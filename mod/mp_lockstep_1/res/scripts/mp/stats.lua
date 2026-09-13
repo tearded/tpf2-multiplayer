@@ -114,7 +114,7 @@ end
 function CM.statusWords(kv, npeers)
 	if kv.resync == "1" then
 		return "Resync: " .. tostring(kv.resyncstatus or "waiting")
-			.. ". Open Resync... for the host save and restart instructions. Closing the window does not resume play."
+			.. ". Saving, transfer, reload and comparison run automatically. Closing the window does not resume play."
 	end
 	local state, who, what = CM.verdictWords(kv.verdict)
 	local desyncs = tonumber(kv.desyncs) or 0
@@ -138,7 +138,7 @@ function CM.statusWords(kv, npeers)
 			lines[#lines + 1] = string.format("First noticed at game time %s (%s)%s.", tostring(fd.t or "?"), fd.clock,
 				fd.what and (": " .. fd.what) or "")
 		end
-		lines[#lines + 1] = "Open Resync... to prepare recovery: the host saves, then everyone restarts and loads that save."
+		lines[#lines + 1] = "Open Resync... and press Neu synchronisieren to save, transfer and reload the host world automatically."
 		return table.concat(lines, NL)
 	end
 	if state == "sync" then

@@ -1,7 +1,7 @@
 # One-click recovery after a desync
 
-The local implementation replaces the guided recovery from release 0.4.22.
-It is **awaiting the two-game acceptance test and has not been released**.
+Fork 0.4.23 replaces the guided recovery from release 0.4.22 with automatic
+recovery. The implementation passed the local two-game acceptance tests below.
 
 When a desync is detected, press **Neu synchronisieren** once. The system holds
 both games, saves the host under a unique recovery name, transfers and verifies
@@ -57,7 +57,7 @@ new session. Ordinary lobby start and save selection keep their existing flow.
 All players need the same package: the native wire protocol is now version 4.
 The save/load adapter and Lua/network barrier must be deployed together.
 
-## Validation and remaining work
+## Validation and limits
 
 Automated tests cover the production Lua 5.2 pump and GUI callback; barrier,
 snapshot and runtime state machines; real UDP lobby/save transfer with simulated
@@ -76,10 +76,22 @@ port suppresses overlay rendering during world I/O and checks overlay submission
 and fence completion before reusing resources. These changes address concrete
 renderer hazards; they are **not evidence that the old crash is fixed**.
 
-Before merging or publishing, use the existing two-instance rig with backed-up
-test saves and matching complete packages. Test requests from both host and
-client, intentional pause, a running game, retry/failure, active build previews,
-and subsequent building plus a fresh shared SYNC. Check both game logs and GPU
-events, repeat loading, and compare installed package hashes. The current user
-game must be closed normally before any DLL installation. Only then build the
-next version and publish it through the existing launcher release channel.
+Local acceptance used two real build-35924 games, matching complete candidate
+packages and backed-up test saves. Four recovery operations completed, including
+host and client GUI requests, speed 1, intentional pause, and a live client build
+preview during the hold. All completed epochs produced identical fresh paused
+fingerprints. A deliberate client-only journal change was replaced by the host
+snapshot. The desync indicator was raised through the diagnostic injection path;
+these cases do not claim to reproduce an organic desync.
+
+A deliberate IPC failure after real snapshot transfer held both games. The
+native retry button reused that immutable snapshot with a new epoch, without
+another native save. A street built after recovery appeared in both worlds,
+followed by shared SYNC. Repeated loading produced no observed game crash or
+GPU error event in this run. This is a bounded local test, not a general proof
+against the archived graphics failure or compatibility with every mod set.
+
+For future changes, repeat these cases with the existing rig and compare both
+worlds, logs and installed hashes. Close both games normally before replacing
+DLLs, preserve test evidence before restarting, and verify the complete release
+package and downloaded assets before switching the launcher feed.

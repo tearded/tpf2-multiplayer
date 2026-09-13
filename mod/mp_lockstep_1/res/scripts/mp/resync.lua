@@ -178,6 +178,10 @@ function CM.resyncGuiTick(kv)
 		CM.resyncGuiToken = kv.resynctoken
 	end
 	local held = kv.resync == "1"
+	if CM.resyncGuiHeld and not held and (tonumber(kv.desyncs) or 0) == 0 then
+		if CM.resyncWin then CM.resyncWin:setVisible(false, false) end
+		CM.resyncGuiSeen = nil
+	end
 	if not held and CM.resyncRequested and os.time() - (CM.resyncRequestedAt or 0) > 5 then
 		CM.resyncRequested = nil
 	end
@@ -186,8 +190,8 @@ function CM.resyncGuiTick(kv)
 			CM.resyncShow()
 			CM.resyncGuiSeen = true
 		end
-		CM.resyncGuiHeld = held
 	end
+	CM.resyncGuiHeld = held
 	if CM.resyncWin then
 		if held or CM.resyncRequested ~= kv.resynctoken then CM.resyncText:setText(instructions(kv)) end
 		CM.resyncButton:setEnabled(not held and CM.resyncRequested ~= kv.resynctoken and (tonumber(kv.desyncs) or 0) > 0)

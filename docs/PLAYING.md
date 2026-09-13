@@ -153,11 +153,11 @@ The panel shows the lobby's status line. The common ones:
 Some messages (on a relay, or for a hot join) say the world "loads by itself". It does not: when the
 save is ready, open **LOAD GAME** and pick **mp_shared** as usual.
 
-If the Multiplayer window shows **DESYNC**, use **Resync...** and **Resync vorbereiten**
-to prepare a shared pause. Wait until every player sees **PEERS PAUSED**, then the host
-saves under a new name. Everyone exits and restarts the game, reconnects, and loads the
-freshly transferred host save. Client-only changes are discarded. See [Guided recovery](RESYNC.md)
-for the complete procedure and limits. `/sync` serves joining players; it does not reload
+If the Multiplayer window shows **DESYNC**, press **Neu synchronisieren** once.
+In a two-player host lobby, this pauses both games, saves and transfers the host world,
+reloads both players and compares the fresh worlds before resuming. An intentional
+pause is preserved. Client-only changes are discarded. See [One-click recovery](RESYNC.md)
+for progress, retry and supported-session limits. `/sync` serves joining players; it does not reload
 players already in the game. The recovery window is independent of log reporting below.
 
 The first desync in a session also opens a **Desync detected** window that asks whether to send

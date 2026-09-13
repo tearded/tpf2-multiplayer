@@ -94,4 +94,12 @@ with TemporaryDirectory() as temporary:
     assert clicked != request and 'cmd=sync_request\n' in clicked
     lua.execute('CM.resyncWin.close()')
     assert (directory/'tpf2_sync_request.txt').read_text()==clicked
+    lua.execute("""
+        CM.resyncGuiTick({boot=tostring(os.time()),wall=tostring(os.time()),resynctoken='world',resync='1',resyncstatus='loading'})
+        assert(CM.resyncWin.visible)
+        CM.resyncGuiTick({boot=tostring(os.time()),wall=tostring(os.time()),resynctoken='world',desyncs='0'})
+        assert(not CM.resyncWin.visible)
+        CM.resyncGuiTick({boot=tostring(os.time()),wall=tostring(os.time()),resynctoken='world',desyncs='1'})
+        assert(CM.resyncWin.visible)
+    """)
 print('PASS: real Lua 5.2 producer hold, fresh paused comparison, stale/partial IPC, PID guard, pause preservation and one-click GUI; engine simulated')

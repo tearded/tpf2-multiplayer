@@ -112,6 +112,10 @@ end
 -- The status line. kv: our dash values; npeers: players heard right now.
 -- CM.guiFirstDesync remembers the first desync this GUI state saw.
 function CM.statusWords(kv, npeers)
+	if kv.resync == "1" then
+		return "Guided resync: " .. tostring(kv.resyncstatus or "waiting")
+			.. ". Open Resync... for the host save and restart instructions. Closing the window does not resume play."
+	end
 	local state, who, what = CM.verdictWords(kv.verdict)
 	local desyncs = tonumber(kv.desyncs) or 0
 	local t = tonumber(kv.t)
@@ -134,7 +138,7 @@ function CM.statusWords(kv, npeers)
 			lines[#lines + 1] = string.format("First noticed at game time %s (%s)%s.", tostring(fd.t or "?"), fd.clock,
 				fd.what and (": " .. fd.what) or "")
 		end
-		lines[#lines + 1] = "It does not fix itself: the host saves, then everyone loads that save again."
+		lines[#lines + 1] = "Open Resync... to prepare recovery: the host saves, then everyone restarts and loads that save."
 		return table.concat(lines, NL)
 	end
 	if state == "sync" then

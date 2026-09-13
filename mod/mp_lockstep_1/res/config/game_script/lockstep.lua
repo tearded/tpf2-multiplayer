@@ -620,6 +620,7 @@ CM.boot("mp.stats")
 -- ---------- the desync popup: send this game's logs to the developers? (GUI state) ----------
 -- Lives in res/scripts/mp/desyncreport.lua.
 CM.boot("mp.desyncreport")
+CM.boot("mp.resync")
 -- ---------- desync check ----------
 function CM.compareAt(stamp)
 	CM.comparedAt[stamp] = CM.comparedAt[stamp] or {}
@@ -695,6 +696,12 @@ function data()
 	return {
 		update = function()
 			CM.ticks = CM.ticks + 1
+			if not K.INSTANCE and not CM.detectInstance() then return end
+			-- Recovery is checked before every command producer, including deferred
+			-- company repairs. Only receive/heartbeat traffic survives the hold.
+			CM.pollResyncRequest()
+			CM.pollEvents()
+			if CM.resyncHold and CM.resyncPump(CM.gameTime() or 0) then return end
 			pcall(CM.sampleSimRate)
 			if CM.cmVehPending or CM.cmRepairAt then pcall(CM.cmVehRecheck) end   -- companies: vehicles left to follow their lines in a switch
 			if CM.ticks % 60 == 0 or not K.INSTANCE then
@@ -735,7 +742,6 @@ function data()
 			-- Both every tick. pollInject at every 10th tick added up to 1.9s of
 			-- pure dead time before a build was even scheduled; a file stat per
 			-- tick is far cheaper than that.
-			CM.pollEvents()
 			CM.pollInject()
 			if CM.ticks % K.CON_POLL_EVERY == 0 then CM.pollNewConstructions() end
 			if CM.ticks % K.CON_POLL_EVERY == 3 then CM.pollStops() end
@@ -771,10 +777,10 @@ function data()
 				-- (CM.heartbeatCu: measured against the LEADER, never set on the leader)
 				-- ms= our clock and e= the peers' clocks echoed back (round trips, CM.rttNote);
 				-- ha= the stamp of our highest command, hi= (the gap hold, CM.gapHoldNeed)
-				CM.broadcast(string.format("LSTICK t=%d o=%s s=%d hi=%d%s ms=%d%s%s", math.floor(now), K.INSTANCE, CM.stepOf(now), CM.seqNo,
+				CM.broadcast(string.format("LSTICK t=%d o=%s s=%d hi=%d%s ms=%d%s%s r=%s", math.floor(now), K.INSTANCE, CM.stepOf(now), CM.seqNo,
 					CM.heartbeatCu(now) and " cu=1" or "", math.floor(os.clock() * 1000),
 					CM.lastSchedAt and string.format(" ha=%.4f", CM.lastSchedAt) or "",
-					CM.heartbeatEcho and CM.heartbeatEcho() or ""))
+					CM.heartbeatEcho and CM.heartbeatEcho() or "", CM.resyncToken))
 			end
 
 			CM.paceTick(now)
@@ -977,6 +983,7 @@ function data()
 						f:write("wall=" .. tostring(os.time()) .. "\n")
 						-- the first desync of this game, for the popup (desyncreport.lua)
 						f:write("boot=" .. tostring(CM.bootWall or 0) .. "\n")
+						f:write("resynctoken=" .. CM.resyncToken .. "\n")
 						if CM.firstDesync then
 							f:write("desyncwhy=" .. tostring(CM.firstDesync.why):gsub("%c", " ") .. "\n")
 							f:write("desynct=" .. tostring(math.floor(tonumber(CM.firstDesync.t) or 0)) .. "\n")
@@ -1174,6 +1181,8 @@ function data()
 				local own = K.INSTANCE or "a"
 				local ownKv = readDash(own)
 				local ownWall = ownKv and tonumber(ownKv.wall) or nil
+				local okRecovery, errRecovery = pcall(CM.resyncGuiTick, ownKv)
+				if not okRecovery then print("[ls-gui] resync: " .. tostring(errRecovery)) end
 				if CM.desyncReportTick then
 					local okR, errR = pcall(CM.desyncReportTick, ownKv)
 					if not okR then print("[ls-gui] desync report: " .. tostring(errR)) end
@@ -1404,6 +1413,10 @@ function data()
 						D.chatBox:setVisible(CM.dashShowChat, false)
 						D.coBox:setVisible(CM.dashShowCompanies, false)
 					end)
+					local recovery = api.gui.comp.Button.new(api.gui.comp.TextView.new("  Resync...  "), true)
+					recovery:onClick(function() CM.resyncShow() end)
+					box:addItem(recovery)
+					D.resyncButton = recovery
 					local body = api.gui.comp.Component.new("mpDashboard")
 					body:setLayout(box)
 					D.win = api.gui.comp.Window.new("Multiplayer", body)
@@ -1425,6 +1438,7 @@ function data()
 					end
 				end
 				local mine = fresh[own]
+				D.resyncButton:setEnabled(mine ~= nil and (mine.resync == "1" or (tonumber(mine.desyncs) or 0) > 0))
 				-- the verdict and, per peer, our verdict against that peer
 				local vs = {}
 				for o, info in pairs(peerInfo) do vs[#vs + 1] = o .. " " .. tostring(info.verdict) end

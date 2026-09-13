@@ -1,9 +1,9 @@
 # One-click recovery after a desync
 
-Fork 0.4.23 replaces the guided recovery from release 0.4.22 with automatic
+Fork 0.4.24 replaces the guided recovery from release 0.4.22 with automatic
 recovery. The implementation passed the local two-game acceptance tests below.
 
-When a desync is detected, press **Neu synchronisieren** once. The system holds
+When a desync is detected, press **Resync now** once. The system holds
 both games, saves the host under a unique recovery name, transfers and verifies
 that exact save set, reloads both worlds in the existing processes and compares
 the freshly loaded, paused worlds. It resumes only after the shared comparison
@@ -12,9 +12,9 @@ Changes present only on the client are replaced by the host's world.
 
 The native Multiplayer status window shows progress. During native saving and
 loading, the custom overlay stops drawing; the game's own loading screen remains.
-Closing the status window only collapses it. **Erneut versuchen** is available
+Closing the status window only collapses it. **Retry** is available
 after a failure and reuses a completed, verified snapshot when one exists.
-**Abbrechen** retains the hold. To abandon recovery entirely, exit both games
+**Cancel** retains the hold. To abandon recovery entirely, exit both games
 normally and start a new lobby. Neither an error nor a timeout unpauses a diverged
 world. Log upload preferences remain independent of recovery.
 

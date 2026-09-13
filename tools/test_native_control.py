@@ -59,8 +59,9 @@ code = code.replace('NATIVE_IO', (root/'native/src/native_io.h').as_posix())
 code = code.replace('NATIVE_CONTROL', (root/'native/src/native_control.h').as_posix())
 code = code.replace('CONTROL_CPP', (root/'native/src/native_control.cpp').as_posix())
 (out/'test.cpp').write_text(code)
-vcvars = r'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat'
-(out/'build.cmd').write_text(f'@echo off\ncall "{vcvars}" >nul\n'
+vcvars = root / 'tools' / 'msvc_env.bat'
+(out/'build.cmd').write_text(f'@echo off\ncall "{vcvars}" || exit /b 1\n'
     'cl /nologo /EHsc /W4 test.cpp /Fe:test.exe >build.log 2>&1\n'
-    'if errorlevel 1 (type build.log & exit /b 1)\ntest.exe\n')
-subprocess.run(['cmd','/c','build.cmd'], cwd=out, check=True, timeout=20)
+    'if errorlevel 1 (type build.log & exit /b 1)\nexit /b 0\n')
+subprocess.run(['cmd','/d','/c','build.cmd'], cwd=out, check=True, timeout=180)
+subprocess.run([str(out / 'test.exe')], cwd=out, check=True, timeout=20)

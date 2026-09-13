@@ -138,7 +138,7 @@ function CM.statusWords(kv, npeers)
 			lines[#lines + 1] = string.format("First noticed at game time %s (%s)%s.", tostring(fd.t or "?"), fd.clock,
 				fd.what and (": " .. fd.what) or "")
 		end
-		lines[#lines + 1] = "Open Resync... and press Neu synchronisieren to save, transfer and reload the host world automatically."
+		lines[#lines + 1] = "Open Resync... and press Resync now to save, transfer and reload the host world automatically."
 		return table.concat(lines, NL)
 	end
 	if state == "sync" then

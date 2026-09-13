@@ -901,37 +901,37 @@ static void RenderPanelLayer(int w, int h)
     int pad = S(25), cy = S(56);
     const LONG page=InterlockedCompareExchange(&g_uiState,0,0);
     if(page==4) {
-        mwButton(0,0,w,h,L"Multiplayer-Status",81);
+        mwButton(0,0,w,h,L"Multiplayer status",81);
     } else if(page==3) {
         char phase[24],detail[420],failedStep[24];
         EnterCriticalSection(&g_modelCs);
         strcpy_s(phase,g_recoveryPhase); strcpy_s(detail,g_recoveryDetail); strcpy_s(failedStep,g_recoveryFailedStep);
         LeaveCriticalSection(&g_modelCs);
-        mwTitle(L"GEMEINSAMES SPIEL"); mwClose(w,80);
-        const wchar_t* label=L"Spiel wird angehalten";
-        if(!strcmp(phase,"waiting")) label=L"Desync erkannt. Beide Spiele sind angehalten.";
-        else if(!strcmp(phase,"saving")) label=L"Host speichert";
-        else if(!strcmp(phase,"transferring")) label=L"Spielstand wird übertragen";
-        else if(!strcmp(phase,"loading")) label=L"Spielstand wird geladen";
-        else if(!strcmp(phase,"checking") || !strcmp(phase,"releasing")) label=L"Synchronisierung wird geprüft";
-        else if(!strcmp(phase,"complete")) label=L"Alle Spieler sind synchronisiert.";
-        else if(!strcmp(phase,"aborted")) label=L"Resync abgebrochen. Das Spiel bleibt angehalten.";
+        mwTitle(L"MULTIPLAYER RESYNC"); mwClose(w,80);
+        const wchar_t* label=L"Pausing both games";
+        if(!strcmp(phase,"waiting")) label=L"Desync detected. Both games are paused.";
+        else if(!strcmp(phase,"saving")) label=L"Saving the host world";
+        else if(!strcmp(phase,"transferring")) label=L"Transferring the save";
+        else if(!strcmp(phase,"loading")) label=L"Loading the save";
+        else if(!strcmp(phase,"checking") || !strcmp(phase,"releasing")) label=L"Checking that both worlds match";
+        else if(!strcmp(phase,"complete")) label=L"All players are in sync.";
+        else if(!strcmp(phase,"aborted")) label=L"Resync cancelled. Both games remain paused.";
         else if(!strcmp(phase,"error")) {
-            label=L"Synchronisierung angehalten";
-            if(!strcmp(failedStep,"holding")) label=L"Fehler beim Anhalten";
-            else if(!strcmp(failedStep,"saving")) label=L"Fehler beim Speichern";
-            else if(!strcmp(failedStep,"transferring")) label=L"Fehler bei der Übertragung";
-            else if(!strcmp(failedStep,"loading")) label=L"Fehler beim Laden";
-            else if(!strcmp(failedStep,"checking") || !strcmp(failedStep,"releasing")) label=L"Fehler bei der Synchronisierungsprüfung";
+            label=L"Resync stopped";
+            if(!strcmp(failedStep,"holding")) label=L"Could not pause both games";
+            else if(!strcmp(failedStep,"saving")) label=L"Could not save the host world";
+            else if(!strcmp(failedStep,"transferring")) label=L"Save transfer failed";
+            else if(!strcmp(failedStep,"loading")) label=L"Could not load the save";
+            else if(!strcmp(failedStep,"checking") || !strcmp(failedStep,"releasing")) label=L"World comparison failed";
         }
         mwBody(pad,cy,w-2*pad,S(40),label);
         if(detail[0]) { wchar_t text[420]; MultiByteToWideChar(CP_UTF8,0,detail,-1,text,420);
             mwBody(pad,cy+S(42),w-2*pad,S(60),text,MW_DIM); }
-        mwBody(pad,h-S(130),w-2*pad,S(40),L"Der Host-Stand gilt. Änderungen nur beim Client werden nicht übernommen.",MW_DIM);
-        if(!strcmp(phase,"error")) mwButton(pad,h-S(76),S(180),S(30),L"Erneut versuchen",82);
+        mwBody(pad,h-S(130),w-2*pad,S(40),L"The host world is used. Client-only changes will be lost.",MW_DIM);
+        if(!strcmp(phase,"error")) mwButton(pad,h-S(76),S(180),S(30),L"Retry",82);
         else if(!strcmp(phase,"waiting") || !strcmp(phase,"complete"))
-            mwButton(pad,h-S(76),S(210),S(30),L"Neu synchronisieren",84);
-        if(strcmp(phase,"complete")) mwButton(w-pad-S(160),h-S(76),S(160),S(30),L"Abbrechen",83);
+            mwButton(pad,h-S(76),S(210),S(30),L"Resync now",84);
+        if(strcmp(phase,"complete")) mwButton(w-pad-S(160),h-S(76),S(160),S(30),L"Cancel",83);
         mwStatus(w,h);
     } else if (page == 2) {
         // ---------------- LOBBY ----------------
@@ -2517,7 +2517,7 @@ static DWORD WINAPI LobbyThread(LPVOID param)
                             InterlockedExchange(&g_recoveryWorldIo, !strcmp(phase,"saving") || !strcmp(phase,"loading"));
                             jsonStr(rem,"step",g_recoveryFailedStep,sizeof(g_recoveryFailedStep));
                             LeaveCriticalSection(&g_modelCs);
-                            SetStatus(!strcmp(phase,"complete") ? "Synchronisierung abgeschlossen." : "");
+                            SetStatus(!strcmp(phase,"complete") ? "Resync complete." : "");
                             InterlockedExchange(&g_recoveryPresent,1);
                             if(fresh) InterlockedExchange(&g_uiState,3);
 

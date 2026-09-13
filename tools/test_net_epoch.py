@@ -9,6 +9,7 @@ out.mkdir(parents=True, exist_ok=True)
 #include <cassert>
 #include <functional>
 #include <vector>
+#include <crtdbg.h>
 static std::mutex receivedMutex;
 static std::vector<std::string> received;
 static int resets=0;
@@ -22,6 +23,10 @@ static void waitFor(std::function<bool()> predicate) {
 static size_t pending() { size_t n; Net_Stats(nullptr,nullptr,&n,nullptr,nullptr); return n; }
 static bool alive() { bool yes; Net_Stats(nullptr,nullptr,nullptr,&yes,nullptr); return yes; }
 int main() {
+    // CI has no interactive desktop: failed assertions must not open a dialog.
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
     assert(EnsureWsa());
     SOCKET peer=socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP);
     sockaddr_in endpoint{}; endpoint.sin_family=AF_INET; endpoint.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
@@ -67,8 +72,11 @@ int main() {
 }
 ''', encoding='utf-8')
 vcvars = root / 'tools' / 'msvc_env.bat'
-(out / 'build.cmd').write_text(f'@echo off\ncall "{vcvars}" >nul\n'
+(out / 'build.cmd').write_text(f'@echo off\ncall "{vcvars}" || exit /b 1\n'
     'cl /nologo /EHsc /W4 test.cpp /Fe:test.exe >build.log 2>&1\n'
     'if errorlevel 1 (type build.log & exit /b 1)\n'
-    'test.exe\n', encoding='utf-8')
-subprocess.run(['cmd', '/c', 'build.cmd'], cwd=out, check=True, timeout=30)
+    'exit /b 0\n', encoding='utf-8')
+# Initial toolchain discovery can take longer on a cold hosted runner. Keep
+# execution separately bounded so a compiler timeout cannot hide a hung test.
+subprocess.run(['cmd', '/d', '/c', 'build.cmd'], cwd=out, check=True, timeout=180)
+subprocess.run([str(out / 'test.exe')], cwd=out, check=True, timeout=30)

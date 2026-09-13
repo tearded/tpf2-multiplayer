@@ -120,15 +120,15 @@ end
 
 local function instructions(kv)
 	if kv.resync == "1" then
-		return "Resync: " .. tostring(kv.resyncstatus or "Anfrage ausstehend")
-			.. "\n\nSpeichern, Uebertragen, Neuladen und Pruefen laufen automatisch.\n"
-			.. "Der Multiplayer-Status zeigt den Fortschritt und eventuelle Fehler."
+		return "Resync: " .. tostring(kv.resyncstatus or "Request pending")
+			.. "\n\nSaving, transferring, reloading and checking run automatically.\n"
+			.. "Multiplayer status shows progress and any errors."
 	end
-	return "Die Spielwelten stimmen nicht mehr ueberein.\n\n"
-		.. "Neu synchronisieren haelt beide Spiele an, speichert den Host,\n"
-		.. "uebertraegt den Stand und laedt ihn bei beiden Spielern neu.\n"
-		.. "Nach erfolgreichem Abgleich geht es automatisch weiter.\n\n"
-		.. "Der Host-Stand gilt; reine Client-Aenderungen gehen verloren."
+	return "The game worlds are out of sync.\n\n"
+		.. "Resync now pauses both games, saves the host world,\n"
+		.. "transfers the save and reloads it for both players.\n"
+		.. "Play resumes automatically once both worlds match.\n\n"
+		.. "The host world is used; client-only changes will be lost."
 end
 
 function CM.resyncShow()
@@ -138,27 +138,27 @@ function CM.resyncShow()
 	local box = api.gui.layout.BoxLayout.new("VERTICAL")
 	CM.resyncText = api.gui.comp.TextView.new(instructions(kv))
 	box:addItem(CM.resyncText)
-	CM.resyncButton = api.gui.comp.Button.new(api.gui.comp.TextView.new("  Neu synchronisieren  "), true)
+	CM.resyncButton = api.gui.comp.Button.new(api.gui.comp.TextView.new("  Resync now  "), true)
 	CM.resyncButton:setEnabled(kv.resync ~= "1")
 	CM.resyncButton:onClick(function()
 		local current = CM.resyncGuiDash
 		if not validDash(current) or current.resync == "1" or (tonumber(current.desyncs) or 0) < 1 then return end
 		if not CM.syncRequest("sync_request") then
-			CM.resyncText:setText("Automatischer Resync ist noch nicht verfuegbar. Beide Spieler muessen dieselbe Version in einer Host-Lobby verwenden.")
+			CM.resyncText:setText("Automatic resync is unavailable. Both players must use the same version in a player-hosted lobby.")
 			return
 		end
 		CM.resyncRequested = current.resynctoken
 		CM.resyncRequestedAt = os.time()
-		CM.resyncText:setText("Resync angefordert. Warte auf Bestaetigung; keine Bauaktionen ausfuehren.")
+		CM.resyncText:setText("Resync requested. Waiting for confirmation; do not build anything.")
 		CM.resyncButton:setEnabled(false)
 	end)
 	box:addItem(CM.resyncButton)
-	local close = api.gui.comp.Button.new(api.gui.comp.TextView.new("  Schliessen  "), true)
+	local close = api.gui.comp.Button.new(api.gui.comp.TextView.new("  Close  "), true)
 	close:onClick(function() CM.resyncWin:setVisible(false, false) end)
 	box:addItem(close)
 	local body = api.gui.comp.Component.new("mpResync")
 	body:setLayout(box)
-	CM.resyncWin = api.gui.comp.Window.new("Neu synchronisieren", body)
+	CM.resyncWin = api.gui.comp.Window.new("Resync now", body)
 	CM.resyncWin:addHideOnCloseHandler()
 	pcall(function() CM.resyncWin:setPosition(120, 220) end)
 end
@@ -167,7 +167,7 @@ function CM.resyncGuiTick(kv)
 	CM.resyncGuiDash = kv
 	if not validDash(kv) then
 		if CM.resyncWin then
-			CM.resyncText:setText("Warte auf aktuellen Spielstatus. Keine Bauaktionen ausfuehren.")
+			CM.resyncText:setText("Waiting for current game status. Do not build anything.")
 			CM.resyncButton:setEnabled(false)
 		end
 		return

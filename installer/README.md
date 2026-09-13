@@ -188,10 +188,14 @@ value skips both checks; it exists for test rigs.
 
 ## Building the MSI
 
+The fork also builds validated MSI artifacts with GitHub Actions. See
+[Fork builds and launcher releases](../docs/FORK_BUILDS.md) for automatic builds
+and publishing a version to the release launcher.
+
 Prerequisites:
 
-- Visual Studio 2022 Build Tools with the MSVC x64 toolchain, in its default location (the `.bat` scripts
-  call its `vcvars64.bat`).
+- Visual Studio with the MSVC x64 toolchain (Build Tools or a full edition).
+  The `.bat` scripts locate it through `tools/msvc_env.bat` and vswhere.
 - Python 3.12 with `pip install pyinstaller -r netpunch\requirements.txt`.
 - WiX Toolset v7 as a .NET global tool (`dotnet tool install --global wix`). `build_msi.ps1` runs it from
   `%USERPROFILE%\.dotnet\tools\wix.exe` and adds `WixToolset.UI.wixext` if it is missing.
@@ -209,6 +213,7 @@ powershell -ExecutionPolicy Bypass -File installer\build_msi.ps1 [-AcceptWixEula
 | `-Validate` | after building, run an administrative install into a temporary folder and list what it extracted |
 | `-Version x.y.z` | stamp this version instead of `installer\VERSION` |
 | `-AcceptWixEula` | pass `--acceptEula wix7` to `wix build` |
+| `-IncludePreviews` | build and package the optional preview DLL alongside its committed Lua integration |
 
 What it does:
 

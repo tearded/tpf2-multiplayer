@@ -43,6 +43,10 @@ After building, extract the MSI with msiexec /a into a temp folder and list it.
 .PARAMETER AcceptWixEula
 Pass --acceptEula wix7 to wix for this run.
 
+.PARAMETER IncludePreviews
+Build and package tpf2_previews.dll when the optional preview sources and Lua
+integration are part of the checkout. CI checks that they are present together.
+
 .PARAMETER Version
 Package version (three-part). Defaults to the contents of installer\VERSION, which
 is the single source of truth for what a release is called -- every 0.1.x MSI up to

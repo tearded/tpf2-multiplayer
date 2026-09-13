@@ -17,7 +17,7 @@ if ($env:GITHUB_REF -like 'refs/tags/*' -and -not (Test-Path -LiteralPath "docs/
 
 python tools/luacheck.py
 if ($LASTEXITCODE -ne 0) { throw 'Lua syntax checks failed' }
-foreach ($testName in @('crossing_replay_test.py','bridge_companion_test.py','edge_demolition_test.py','track_fresh_test.py','delay_hold_test.py','preview_test.py')) {
+foreach ($testName in @('crossing_replay_test.py','bridge_companion_test.py','edge_demolition_test.py','track_fresh_test.py','delay_hold_test.py','preview_test.py','preview_perf_test.py')) {
     $testPath = Join-Path tools $testName
     if (Test-Path -LiteralPath $testPath) {
         python $testPath

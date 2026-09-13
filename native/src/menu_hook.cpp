@@ -1257,7 +1257,8 @@ static void PanelLayout()
 {
     g_s = UiScale();
     if (InterlockedCompareExchange(&g_uiState, 0, 0) == 4) { g_copyW = S(220); g_copyH = S(36); }
-    else if (InterlockedCompareExchange(&g_uiState, 0, 0) >= 2) { g_copyW = S(780); g_copyH = S(540); }
+    else if (InterlockedCompareExchange(&g_uiState, 0, 0) == 3) { g_copyW = S(520); g_copyH = S(300); }
+    else if (InterlockedCompareExchange(&g_uiState, 0, 0) == 2) { g_copyW = S(780); g_copyH = S(540); }
     else                                                     { g_copyW = S(780); g_copyH = g_flagMaster[0] ? S(540) : S(300); }
     if (g_copyW > g_panelW) g_copyW = g_panelW; if (g_copyH > g_panelH) g_copyH = g_panelH;
     g_panelX = ((int)g_scExtent.width - g_copyW) / 2;

@@ -96,7 +96,7 @@ with TemporaryDirectory() as temporary:
     assert (directory/'tpf2_sync_request.txt').read_text()==clicked
     lua.execute("""
         CM.resyncGuiTick({boot=tostring(os.time()),wall=tostring(os.time()),resynctoken='world',resync='1',resyncstatus='loading'})
-        assert(CM.resyncWin.visible)
+        assert(not CM.resyncWin.visible)
         CM.resyncGuiTick({boot=tostring(os.time()),wall=tostring(os.time()),resynctoken='world',desyncs='0'})
         assert(not CM.resyncWin.visible)
         CM.resyncGuiTick({boot=tostring(os.time()),wall=tostring(os.time()),resynctoken='world',desyncs='1'})

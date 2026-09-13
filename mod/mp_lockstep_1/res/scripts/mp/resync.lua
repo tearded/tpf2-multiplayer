@@ -133,7 +133,7 @@ end
 
 function CM.resyncShow()
 	local kv = CM.resyncGuiDash
-	if not validDash(kv) or (kv.resync ~= "1" and (tonumber(kv.desyncs) or 0) < 1) then return end
+	if not validDash(kv) or kv.resync == "1" or (tonumber(kv.desyncs) or 0) < 1 then return end
 	if CM.resyncWin then CM.resyncWin:setVisible(true, false); return end
 	local box = api.gui.layout.BoxLayout.new("VERTICAL")
 	CM.resyncText = api.gui.comp.TextView.new(instructions(kv))
@@ -178,6 +178,14 @@ function CM.resyncGuiTick(kv)
 		CM.resyncGuiToken = kv.resynctoken
 	end
 	local held = kv.resync == "1"
+	-- Native progress survives world reloads. Do not put a second Lua window
+	-- over it while the operation is active, including errors and retries.
+	if held then
+		if CM.resyncWin then CM.resyncWin:setVisible(false, false) end
+		CM.resyncGuiHeld = true
+		CM.resyncGuiSeen = nil
+		return
+	end
 	if CM.resyncGuiHeld and not held and (tonumber(kv.desyncs) or 0) == 0 then
 		if CM.resyncWin then CM.resyncWin:setVisible(false, false) end
 		CM.resyncGuiSeen = nil

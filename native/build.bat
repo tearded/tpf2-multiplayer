@@ -67,9 +67,11 @@ exit /b 0
 
 :menu
 %CC% /utf-8 /c src\hook.cpp /Fo:out\hook_menu.obj                                    || exit /b 1
+%CC% /utf-8 /c src\native_io.cpp /Fo:out\native_io.obj || exit /b 1
+%CC% /utf-8 /c src\native_control.cpp /Fo:out\native_control.obj || exit /b 1
 %CC% /utf-8 /c src\menu_hook.cpp /Fo:out\menu_hook.obj                               || exit /b 1
 ml64 /nologo /c /Fo out\gameuirelay_menu.obj src\gameuirelay.asm                     || exit /b 1
-link /nologo /DLL /OUT:out\tpf2_menu%SFX%.dll out\hook_menu.obj out\menu_hook.obj out\gameuirelay_menu.obj user32.lib gdi32.lib advapi32.lib || exit /b 1
+link /nologo /DLL /OUT:out\tpf2_menu%SFX%.dll out\hook_menu.obj out\menu_hook.obj out\native_io.obj out\native_control.obj out\gameuirelay_menu.obj user32.lib gdi32.lib advapi32.lib || exit /b 1
 REM Deploy to where the proxy loads it from. Non-fatal: a running game holds the
 REM dll open, and the copy is simply skipped -- redeploy after the relaunch.
 if "%TPF2_BUILD_NO_DEPLOY%"=="1" exit /b 0

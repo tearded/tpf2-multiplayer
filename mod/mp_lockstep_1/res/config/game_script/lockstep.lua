@@ -438,6 +438,7 @@ end
 local hash = CM.boot("mp.hash")
 local worldHash, vposPrune
 CM.gameTime, worldHash, vposPrune = hash.gameTime, hash.worldHash, hash.vposPrune
+CM.recoveryWorldHash = worldHash
 -- ---------- runtime files: append/read, instance detection, wire broadcast ----------
 -- Lives in res/scripts/mp/io.lua.
 CM.boot("mp.io")
@@ -698,10 +699,9 @@ function data()
 			CM.ticks = CM.ticks + 1
 			if not K.INSTANCE and not CM.detectInstance() then return end
 			-- Recovery is checked before every command producer, including deferred
-			-- company repairs. Only receive/heartbeat traffic survives the hold.
-			CM.pollResyncRequest()
+			-- company repairs. Recovery control uses the separate lobby connection.
+			if CM.autoSyncPump(CM.gameTime() or 0) then return end
 			CM.pollEvents()
-			if CM.resyncHold and CM.resyncPump(CM.gameTime() or 0) then return end
 			pcall(CM.sampleSimRate)
 			if CM.cmVehPending or CM.cmRepairAt then pcall(CM.cmVehRecheck) end   -- companies: vehicles left to follow their lines in a switch
 			if CM.ticks % 60 == 0 or not K.INSTANCE then
@@ -1074,6 +1074,7 @@ function data()
 
 		-- ---------- multiplayer status panel (GUI Lua state) ----------
 		guiHandleEvent = function(id, name, param)
+			if CM.recoveryGuiHeld() then return end
 			pcall(CM.previewGuiEvent, id, name, param)
 		end,
 		guiUpdate = function()
@@ -1081,7 +1082,7 @@ function data()
 			-- other players' cursors (cursors.lua): every frame, so the circles glide; ahead of
 			-- the panel's own twice-a-second refresh
 			if CM.cursorGuiTick then pcall(CM.cursorGuiTick) end
-			pcall(CM.previewGuiTick)
+			if not CM.recoveryGuiHeld() then pcall(CM.previewGuiTick) end
 			if guiTick % 30 ~= 0 then return end
 			pcall(function()
 				-- NATIVE WIDGETS. The GUI Lua state has the game's own widget set

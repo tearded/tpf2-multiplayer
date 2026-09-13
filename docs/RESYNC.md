@@ -1,67 +1,85 @@
-# Guided recovery after a desync
+# One-click recovery after a desync
 
-This fork includes the archived project's **guided** resync, adapted to the
-current Lua modules. Saving and restarting remain manual. The archived native
-save/load automation is not part of this port.
+The local implementation replaces the guided recovery from release 0.4.22.
+It is **awaiting the two-game acceptance test and has not been released**.
 
-After a desync, **Gefuehrter Resync** opens once per loaded world. Either player
-can press **Resync vorbereiten** to request a shared pause. **Resync...** in the
-Multiplayer window reopens the instructions. Log-upload preferences are separate;
-choosing **Never** for logs does not disable recovery.
+When a desync is detected, press **Neu synchronisieren** once. The system holds
+both games, saves the host under a unique recovery name, transfers and verifies
+that exact save set, reloads both worlds in the existing processes and compares
+the freshly loaded, paused worlds. It resumes only after the shared comparison
+succeeds. The host's previous speed is restored, including an intentional pause.
+Changes present only on the client are replaced by the host's world.
 
-1. Stop building. Wait until **every player's** recovery window says
-   `PEERS PAUSED`. Missing, stale or incompatible peers prevent this status.
-2. The host saves under a **new, unique name**, preserving earlier saves.
-3. Everyone exits the game normally, then restarts. Returning only to the title
-   menu is insufficient: restarting clears the old bridge and command buffers.
-4. Reconnect in a fresh player-hosted lobby. The host uses **SAVE...** to select
-   exactly the new save, then **START GAME** to transfer it.
-5. Wait for successful transfer, then everyone loads the freshly transferred
-   **mp_shared** and waits for all players and a fresh **SYNC** before building.
-   If transfer fails, retry it; do not load an older mp_shared.
+The native Multiplayer status window shows progress. During native saving and
+loading, the custom overlay stops drawing; the game's own loading screen remains.
+Closing the status window only collapses it. **Erneut versuchen** is available
+after a failure and reuses a completed, verified snapshot when one exists.
+**Abbrechen** retains the hold. To abandon recovery entirely, exit both games
+normally and start a new lobby. Neither an error nor a timeout unpauses a diverged
+world. Log upload preferences remain independent of recovery.
 
-The host's world is authoritative. Changes present only on a client are lost;
-the worlds are not merged. Do not use the relay's previously stored world as
-the recovery source or invite additional players during recovery.
+## Supported session
 
-Closing either window hides it; it does not release the hold. There is no
-timeout that resumes a diverged world. If a peer cannot acknowledge, pause that
-game manually and coordinate the host-save/restart procedure with all players.
+This first port supports **two players in a player-hosted lobby**, both running
+the same fork package, on the exact supported Windows game build 35924. A whole
+executable SHA-256 check guards the build-specific native adapter. Dedicated
+relays and additional players do not advertise automatic recovery. Once recovery
+has begun, the player roster is fixed; adding or replacing a player requires a
+new session. Ordinary lobby start and save selection keep their existing flow.
 
-## What the hold guarantees
+## Implementation
 
-The Lua update exits before capture, replay, deferred company repairs and pacing.
-Local scheduling and inbound game commands are suppressed while recovery
-heartbeats continue. Requests repeat and identify both loaded-world tokens;
-old local request files, wrong targets and unknown or stale senders are ignored.
-The lobby's required player count cannot shrink during recovery. A pause is
-acknowledged only after the engine reports speed zero.
+- `netpunch/sync_operation.py` owns the host-authoritative barrier. Requests and
+  acknowledgements name operation, revision, phase and a fresh world epoch.
+  The host waits for every original participant, checks exact snapshot hashes
+  and fresh paused fingerprints, and retains the hold on errors or disconnects.
+- `sync_runtime.py` coordinates the local native and Lua adapters through
+  PID-scoped files. Native commands require actual completion acknowledgements;
+  enqueueing is not saving or loading successfully.
+- `sync_snapshot.py` owns immutable save bytes, requires `.sav` and `.sav.lua`,
+  includes `.jpg` when present and verifies SHA-256 throughout. Unique
+  `mp_<epoch-prefix>` names never overwrite unrelated user saves.
+- `sync_lobby.py` uses the existing authenticated lobby and reliable save
+  transport, repeats control messages, rejects duplicates and keeps recovery
+  transfers separate from normal start/hot-join transfers.
+- `native_io.cpp` marshals save, pause/drain and load to the observed engine UI
+  thread. The native input gate stops new user commands and legacy per-frame
+  script events before command creation. A FIFO pause fence drains earlier work.
+- `mp/resync.lua` runs before all simulation producers and stops GUI preview
+  producers too. A newly loaded Lua state reports its own fresh world token.
+  A full paused world hash bypasses the normal running-only hash cadence.
+- `net.cpp` scopes data and ACKs to a world epoch. The bridge resets queues,
+  partial packets and runtime command files together. A tail read begun before
+  reset cannot enqueue into the new world. Epoch requests have a separate
+  `tpf2_epoch_request.txt` mailbox so roster/speed writes cannot undo a reset.
+  Existing exclusive loopback binding and sender-address checks are retained.
 
-This is **not an atomic world lock**. Native build tools remain usable, and
-commands already dispatched to the engine can finish. Do not keep building.
-`PEERS PAUSED` proves recent reported pauses, not command drain or world equality.
-Restarting all games and loading one fresh host save performs the actual resync.
+All players need the same package: the native wire protocol is now version 4.
+The save/load adapter and Lua/network barrier must be deployed together.
 
-The first request preserves at most 256 KiB from each of four local diagnostic
-files: dashboard, capture, events and inject. Copies use `resync_<world>_<file>`
-in the multiplayer data folder. `INCOMPLETE` means a source was missing or a
-read/write failed; the pause remains active. Recovery does not upload these
-copies or change the existing log-upload preference.
+## Validation and remaining work
 
-All players need the same fork source/package. Older peers can ignore the new
-heartbeat fields and requests, but cannot complete the guided pause handshake.
-The MSI already includes all files under the mod directory, including resync.lua.
+Automated tests cover the production Lua 5.2 pump and GUI callback; barrier,
+snapshot and runtime state machines; real UDP lobby/save transfer with simulated
+engines; actual native UDP epoch resets; and native IPC completion publication
+under Windows sharing violations. They do not prove in-game save/load behavior.
 
-## Validation
+Run `tools/resync_test.py`, `tools/test_sync_operation.py`,
+`tools/test_sync_snapshot.py`, `tools/test_sync_runtime.py`,
+`tools/test_auto_sync_lobby.py`, `tools/test_net_epoch.py` and
+`tools/test_native_control.py`. These are required by `tools/build_release.ps1`.
+The native tests require Windows and the repository MSVC environment helper.
 
-`python tools/resync_test.py` runs the production Lua 5.2 modules with real
-temporary files and simulated engine, GUI and peers. It covers lost/repeated
-requests, world tokens, roster changes, stale acknowledgements, asynchronous
-pause, command suppression, bounded diagnostics, file errors and GUI callbacks.
-Run `tools/luacheck.py` after Lua edits; preview and delay-hold regressions also
-exercise the shared network module.
+The archived automatic implementation had successful game tests and a later
+unresolved Vulkan Device-lost/MemoryException during simultaneous reloads. This
+port suppresses overlay rendering during world I/O and checks overlay submission
+and fence completion before reusing resources. These changes address concrete
+renderer hazards; they are **not evidence that the old crash is fixed**.
 
-A live multiplayer save/restart/retransfer test of this port remains outstanding.
-Use a disposable test save, trigger recovery from host and client in separate
-runs, and compare both worlds and the new SYNC after reloading. These source
-changes alone do not install or publish a launcher update.
+Before merging or publishing, use the existing two-instance rig with backed-up
+test saves and matching complete packages. Test requests from both host and
+client, intentional pause, a running game, retry/failure, active build previews,
+and subsequent building plus a fresh shared SYNC. Check both game logs and GPU
+events, repeat loading, and compare installed package hashes. The current user
+game must be closed normally before any DLL installation. Only then build the
+next version and publish it through the existing launcher release channel.

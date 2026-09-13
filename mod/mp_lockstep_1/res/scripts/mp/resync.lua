@@ -1,126 +1,113 @@
--- Guided recovery, ported from the archived fork's assisted resync.
--- No save/load or native world lock: the user saves the host and restarts ALL
--- games. A pause acknowledgement is not a drain acknowledgement or a SYNC.
+-- One-click recovery. The lobby owns the barrier and native save/load; this
+-- module holds all Lua producers and fingerprints the freshly loaded world.
 return function(CM, K, log)
-local NL = string.char(10)
-local FRESH = 5
 local guiBoot = os.time()
--- Per loaded Lua state; do not use random(), which belongs to the simulation.
 CM.resyncToken = tostring(os.time()) .. tostring({}):gsub("[^%w]", "")
-
 local function fresh(wall)
 	local age = wall and os.time() - wall
-	return age and age >= 0 and age <= FRESH
+	return age and age >= 0 and age <= 5
+end
+function CM.syncRead(name)
+	local f = io.open(K.BASE .. name, "rb")
+	if not f then return nil end
+	local text = f:read(16384) or ""; f:close()
+	if text:sub(-1) ~= "\n" then return nil end
+	local kv = {}
+	for key, value in text:gmatch("([%w_]+)=([^\r\n]*)[\r\n]") do kv[key] = value end
+	return kv
 end
 
-local function requestPath()
-	return K.INSTANCE and K.BASE .. "resync_request_" .. K.INSTANCE .. ".txt"
+function CM.syncRequest(kind)
+	if not K.PROCESS_ID then pcall(CM.detectInstance) end
+	local available = CM.syncRead("tpf2_sync_available.txt")
+	if not available or available.protocol ~= "4" or available.pid ~= K.PROCESS_ID or not tonumber(available.wall)
+		or math.abs(os.time()-tonumber(available.wall)) >= 5 then return false end
+	CM.syncRequestNumber = (CM.syncRequestNumber or 0) + 1
+	local f = io.open(K.BASE .. "tpf2_sync_request.txt", "wb")
+	if not f then return false end
+	local ok = f:write("pid=" .. available.pid .. "\ncmd=" .. kind .. "\nid=" ..
+		CM.resyncToken .. tostring(CM.syncRequestNumber) .. "\n")
+	local closed = f:close()
+	return ok and closed
 end
 
-local function snapshot()
-	local complete = true
-	for _, name in ipairs({ "lockstep_dash_" .. K.INSTANCE .. ".txt",
-		"tpf2_capture_" .. K.INSTANCE .. ".txt", "tpf2_events_" .. K.INSTANCE .. ".txt",
-		"lockstep_inject_" .. K.INSTANCE .. ".txt" }) do
-		local ok = pcall(function()
-			local src = assert(io.open(K.BASE .. name, "rb"))
-			local size = src:seek("end")
-			if not size or not src:seek("set", math.max(0, size - 262144)) then src:close(); error("seek failed") end
-			local body = src:read(262144); src:close()
-			if body == nil and size > 0 then error("read failed") end
-			local dst = assert(io.open(K.BASE .. "resync_" .. CM.resyncToken .. "_" .. name, "wb"))
-			local written = dst:write(body or ""); local closed = dst:close()
-			assert(written and closed)
-		end)
-		if not ok then complete = false end
+function CM.recoveryGuiHeld()
+	if not K.PROCESS_ID then pcall(CM.detectInstance) end
+	local state = CM.syncRead("tpf2_sync_lua.txt")
+	if state and state.pid == K.PROCESS_ID and state.operation and state.epoch
+		and #state.operation == 32 and not state.operation:find("[^0-9a-f]")
+		and #state.epoch == 32 and not state.epoch:find("[^0-9a-f]")
+		and tonumber(state.revision) and tonumber(state.revision) > (CM.recoveryGuiRevision or 0)
+		and ({holding=true, waiting=true, saving=true, transferring=true, loading=true,
+			checking=true, releasing=true, complete=true, error=true, aborted=true})[state.phase] then
+		CM.recoveryGuiRevision = tonumber(state.revision)
+		CM.recoveryGuiHold = state.phase ~= "complete"
 	end
-	return complete and "OK" or "INCOMPLETE"
+	return CM.recoveryGuiHold
 end
 
-local function readRoster()
-	-- Never lower the requirement on disconnect. Include joiners announced by
-	-- the lobby even before their first heartbeat reaches this loaded world.
-	CM.resyncExpected = math.max(CM.resyncExpected or 2, CM.rosterPlayers or 2)
-	local f = io.open(K.BASE .. "tpf2_bridge_ctl.txt", "r")
-	if f then
-		local body = f:read(4096) or ""; f:close()
-		CM.resyncExpected = math.max(CM.resyncExpected, tonumber(body:match("players=(%d+)")) or 2)
-	end
-end
-
-function CM.beginResync()
-	if CM.resyncHold or not K.INSTANCE then return end
-	CM.resyncHold = true
-	readRoster()
-	CM.setSpeed(0, "guided resync")
-	CM.resyncEvidence = snapshot()
-	log("RESYNC: guided recovery hold; save the host under a new name and restart every game")
-end
-
-function CM.pollResyncRequest()
-	if CM.resyncHold or not K.INSTANCE then return end
-	local f = io.open(requestPath(), "r")
-	if not f then return end
-	local body = f:read(256) or ""; f:close()
-	-- Require a complete write as well as the exact loaded-world token.
-	if body == CM.resyncToken .. NL and CM.firstDesync then CM.beginResync() end
-end
-
-function CM.resyncReceive(line)
-	local o, target, sender = line:match("^LSRESYNC o=([a-h]) target=(%w+) sender=(%w+)$")
-	local pr = o and o ~= K.INSTANCE and CM.peers[o]
-	if pr and target == CM.resyncToken and sender == pr.resyncToken and fresh(pr.resyncWall) then
-		CM.beginResync()
-	end
-end
-
-function CM.resyncHeartbeat(pr, line)
-	pr.resyncToken = line:match(" r=(%w+)")
-	pr.resyncHeld = line:match(" hold=(%d+)") == "1"
-	pr.resyncWall = os.time()
-end
-
-function CM.resyncPump(now)
-	if not CM.resyncHold then return false end
-	if not CM.resyncRosterAt or os.time() ~= CM.resyncRosterAt then
-		readRoster()
-		CM.resyncRosterAt = os.time()
-	end
-	local speed
-	pcall(function() speed = game.interface.getGameSpeed() end)
-	if speed ~= 0 then CM.setSpeed(0, "resync hold") end
-	if CM.ticks % K.HEARTBEAT_EVERY == 0 then
-		CM.broadcast(string.format("LSTICK t=%d o=%s s=%d hi=%d r=%s hold=%d",
-			math.floor(now), K.INSTANCE, CM.stepOf(now), CM.seqNo, CM.resyncToken, speed == 0 and 1 or 0))
-		for o, pr in pairs(CM.peers) do
-			if o ~= K.INSTANCE and pr.resyncToken and fresh(pr.resyncWall) then
-				CM.broadcast("LSRESYNC o=" .. K.INSTANCE .. " target=" .. pr.resyncToken .. " sender=" .. CM.resyncToken)
+function CM.autoSyncPump(now)
+	local incoming = CM.syncRead("tpf2_sync_lua.txt")
+	if incoming and incoming.pid == K.PROCESS_ID and incoming.operation and incoming.epoch
+		and #incoming.operation == 32 and not incoming.operation:find("[^0-9a-f]")
+		and #incoming.epoch == 32 and not incoming.epoch:find("[^0-9a-f]")
+		and tonumber(incoming.revision) and tonumber(incoming.revision) >= 1
+		and ({holding=true, waiting=true, saving=true, transferring=true, loading=true,
+			checking=true, releasing=true, complete=true, error=true, aborted=true})[incoming.phase] then
+		local old = CM.autoSync
+		if (old or incoming.phase ~= "complete") and (not old or tonumber(incoming.revision) > tonumber(old.revision)) then
+			CM.autoSync = incoming
+			if not old or old.operation ~= incoming.operation then
+				local speed; pcall(function() speed = game.interface.getGameSpeed() end)
+				CM.autoResumeSpeed = speed or CM.baseSpeed or 0
+				CM.setSpeed(0, "automatic world operation")
 			end
+			CM.autoFingerprint = nil
 		end
 	end
-	local pending, count = {}, 0
-	for o, pr in pairs(CM.peers) do
-		if o ~= K.INSTANCE then
-			count = count + 1
-			if not pr.resyncToken or not pr.resyncHeld or not fresh(pr.resyncWall) then pending[#pending + 1] = o end
+	local state = CM.autoSync
+	if not state then return false end
+	if state.phase == "complete" then
+		if not CM.autoReleased or CM.autoReleased ~= state.epoch then
+			local speed = tonumber(state.resume_speed)
+			if speed ~= 0 and speed ~= 1 and speed ~= 2 and speed ~= 4 then return true end
+			CM.autoReleased = state.epoch
+			CM.recoveryReleasePacing(speed)
+			CM.lgHolding, CM.resyncHold = false, false
+			CM.baseSpeed = speed
+			CM.setSpeed(speed, "all players verified the new world")
+		end
+		return false
+	end
+	-- Missing/partial control or an error NEVER releases an existing hold.
+	CM.resyncHold = true
+	local speed; pcall(function() speed = game.interface.getGameSpeed() end)
+	if state.phase == "checking" and speed == 0 and not CM.autoFingerprint then
+		local ok, hash, detail = pcall(CM.recoveryWorldHash, now)
+		if ok and hash and detail and not detail:find("invalid", 1, true) then
+			-- Deliberately bypass normal stamp deduplication and the running-only
+			-- hash cadence: this is a fresh comparison of the paused loaded world.
+			CM.autoFingerprint = hash .. ":" .. detail
 		end
 	end
-	table.sort(pending)
-	local status = count < CM.resyncExpected - 1 and "WAITING FOR PEER"
-		or (#pending > 0 and "WAITING: " .. table.concat(pending, ",") or "PEERS PAUSED")
-	if speed ~= 0 then status = "WAITING FOR LOCAL PAUSE" end
-	CM.dashVerdict = "RESYNC - " .. status
-	-- Keep recovery visible in the existing dashboard and log tools, even though
-	-- the normal capture/replay/pacing/update path is held. Never report SYNC here.
-	local body = "boot=" .. tostring(CM.bootWall or 0) .. NL .. "wall=" .. os.time() .. NL
-		.. "resynctoken=" .. CM.resyncToken .. NL .. "resync=1" .. NL
-		.. "resyncstatus=" .. status .. NL .. "evidence=" .. CM.resyncEvidence .. NL
-		.. "t=" .. math.floor(now) .. NL .. "desyncs=" .. (CM.desyncs or 0) .. NL
-		.. "queued=" .. #(CM.queue or {}) .. NL .. "paused=" .. (speed == 0 and "yes" or "no") .. NL
-		.. "speed=" .. tostring(speed or "?") .. NL .. "verdict=" .. CM.dashVerdict .. NL
-	for _, prefix in ipairs({ "lockstep_dash_", "lockstep_status_" }) do
-		local f = io.open(K.BASE .. prefix .. K.INSTANCE .. ".txt", "w")
-		if f then f:write(body); f:close() end
+	local f = io.open(K.BASE .. "tpf2_sync_lua_ack.txt", "wb")
+	if f then
+		f:write("pid=" .. tostring(K.PROCESS_ID) .. "\noperation=" .. state.operation ..
+			"\nepoch=" .. state.epoch .. "\nrevision=" .. state.revision .. "\nphase=" .. state.phase ..
+			"\nheld=1\npaused=" .. (speed == 0 and "1" or "0") ..
+			"\nspeed=" .. tostring(CM.autoResumeSpeed or 0) ..
+			"\nworld=" .. CM.resyncToken ..
+			"\nfingerprint=" .. (CM.autoFingerprint or "") .. "\n")
+		f:close()
+	end
+	if K.INSTANCE then
+		local text = "boot=" .. tostring(CM.bootWall or 0) .. "\nwall=" .. os.time()
+			.. "\nresynctoken=" .. CM.resyncToken .. "\nresync=1\nresyncstatus=" .. state.phase
+			.. "\nverdict=RESYNC - " .. state.phase .. "\npaused=" .. (speed == 0 and "yes" or "no") .. "\n"
+		for _, prefix in ipairs({"lockstep_dash_", "lockstep_status_"}) do
+			local out = io.open(K.BASE .. prefix .. K.INSTANCE .. ".txt", "wb")
+			if out then out:write(text); out:close() end
+		end
 	end
 	return true
 end
@@ -132,24 +119,16 @@ local function validDash(kv)
 end
 
 local function instructions(kv)
-	if kv.resync ~= "1" then
-		return "Die Spielwelten stimmen nicht mehr ueberein.\n\n"
-			.. "Resync vorbereiten fordert einen gemeinsamen Pausenstopp an.\n"
-			.. "Danach speichert nur der Host; alle Spieler starten ihr Spiel neu.\n"
-			.. "Der Host-Stand gilt. Nur beim Client vorhandene Aenderungen gehen verloren.\n\n"
-			.. "Keine weiteren Bauaktionen ausfuehren."
+	if kv.resync == "1" then
+		return "Resync: " .. tostring(kv.resyncstatus or "Anfrage ausstehend")
+			.. "\n\nSpeichern, Uebertragen, Neuladen und Pruefen laufen automatisch.\n"
+			.. "Der Multiplayer-Status zeigt den Fortschritt und eventuelle Fehler."
 	end
-	return "RESYNC VORBEREITEN - " .. tostring(kv.resyncstatus or "Anfrage ausstehend") .. "\n\n"
-		.. "Keine Bauaktionen ausfuehren; die Bauwerkzeuge sind nicht gesperrt.\n"
-		.. "Warten, bis bei ALLEN Spielern PEERS PAUSED steht.\n\n"
-		.. "1. Nur der Host: unter einem NEUEN Namen speichern.\n"
-		.. "2. Alle Spiele regulaer beenden und neu starten.\n"
-		.. "3. Neu verbinden. Host waehlt mit SAVE... genau diesen Stand.\n"
-		.. "4. START GAME uebertraegt ihn. Den frisch uebertragenen Stand laden.\n"
-		.. "5. Auf alle Spieler und einen frischen SYNC warten.\n\n"
-		.. "Der Host-Stand gilt; reine Client-Aenderungen gehen verloren.\n"
-		.. "Schliessen verbirgt nur dieses Fenster. Der Stopp bleibt bis zum Neustart.\n"
-		.. "Lokale Diagnosekopien: " .. tostring(kv.evidence or "ausstehend")
+	return "Die Spielwelten stimmen nicht mehr ueberein.\n\n"
+		.. "Neu synchronisieren haelt beide Spiele an, speichert den Host,\n"
+		.. "uebertraegt den Stand und laedt ihn bei beiden Spielern neu.\n"
+		.. "Nach erfolgreichem Abgleich geht es automatisch weiter.\n\n"
+		.. "Der Host-Stand gilt; reine Client-Aenderungen gehen verloren."
 end
 
 function CM.resyncShow()
@@ -159,20 +138,17 @@ function CM.resyncShow()
 	local box = api.gui.layout.BoxLayout.new("VERTICAL")
 	CM.resyncText = api.gui.comp.TextView.new(instructions(kv))
 	box:addItem(CM.resyncText)
-	CM.resyncButton = api.gui.comp.Button.new(api.gui.comp.TextView.new("  Resync vorbereiten  "), true)
+	CM.resyncButton = api.gui.comp.Button.new(api.gui.comp.TextView.new("  Neu synchronisieren  "), true)
 	CM.resyncButton:setEnabled(kv.resync ~= "1")
 	CM.resyncButton:onClick(function()
 		local current = CM.resyncGuiDash
 		if not validDash(current) or current.resync == "1" or (tonumber(current.desyncs) or 0) < 1 then return end
-		local path = requestPath()
-		local f = path and io.open(path, "w")
-		local written, closed
-		if f then written = f:write(current.resynctoken .. NL); closed = f:close() end
-		if not written or not closed then
-			CM.resyncText:setText("Resync-Anfrage fehlgeschlagen. Erneut versuchen oder manuell pausieren.")
+		if not CM.syncRequest("sync_request") then
+			CM.resyncText:setText("Automatischer Resync ist noch nicht verfuegbar. Beide Spieler muessen dieselbe Version in einer Host-Lobby verwenden.")
 			return
 		end
 		CM.resyncRequested = current.resynctoken
+		CM.resyncRequestedAt = os.time()
 		CM.resyncText:setText("Resync angefordert. Warte auf Bestaetigung; keine Bauaktionen ausfuehren.")
 		CM.resyncButton:setEnabled(false)
 	end)
@@ -182,7 +158,7 @@ function CM.resyncShow()
 	box:addItem(close)
 	local body = api.gui.comp.Component.new("mpResync")
 	body:setLayout(box)
-	CM.resyncWin = api.gui.comp.Window.new("Gefuehrter Resync", body)
+	CM.resyncWin = api.gui.comp.Window.new("Neu synchronisieren", body)
 	CM.resyncWin:addHideOnCloseHandler()
 	pcall(function() CM.resyncWin:setPosition(120, 220) end)
 end
@@ -202,6 +178,9 @@ function CM.resyncGuiTick(kv)
 		CM.resyncGuiToken = kv.resynctoken
 	end
 	local held = kv.resync == "1"
+	if not held and CM.resyncRequested and os.time() - (CM.resyncRequestedAt or 0) > 5 then
+		CM.resyncRequested = nil
+	end
 	if held or (tonumber(kv.desyncs) or 0) > 0 then
 		if not CM.resyncGuiSeen or (held and not CM.resyncGuiHeld) then
 			CM.resyncShow()

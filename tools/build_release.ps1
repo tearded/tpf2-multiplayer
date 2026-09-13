@@ -18,7 +18,11 @@ if ($env:GITHUB_REF -like 'refs/tags/*' -and -not (Test-Path -LiteralPath "docs/
 python tools/luacheck.py
 if ($LASTEXITCODE -ne 0) { throw 'Lua syntax checks failed' }
 python tools/resync_test.py
-if ($LASTEXITCODE -ne 0) { throw 'Guided resync regression failed' }
+if ($LASTEXITCODE -ne 0) { throw 'Automatic resync regression failed' }
+foreach ($testName in @('test_sync_operation.py', 'test_sync_snapshot.py', 'test_sync_runtime.py', 'test_auto_sync_lobby.py', 'test_net_epoch.py', 'test_native_control.py')) {
+    python (Join-Path tools $testName)
+    if ($LASTEXITCODE -ne 0) { throw "Recovery regression failed: $testName" }
+}
 foreach ($testName in @('crossing_replay_test.py','bridge_companion_test.py','edge_demolition_test.py','track_fresh_test.py','delay_hold_test.py','preview_test.py','preview_perf_test.py')) {
     $testPath = Join-Path tools $testName
     if (Test-Path -LiteralPath $testPath) {

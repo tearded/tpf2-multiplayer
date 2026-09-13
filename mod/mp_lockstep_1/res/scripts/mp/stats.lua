@@ -113,7 +113,7 @@ end
 -- CM.guiFirstDesync remembers the first desync this GUI state saw.
 function CM.statusWords(kv, npeers)
 	if kv.resync == "1" then
-		return "Guided resync: " .. tostring(kv.resyncstatus or "waiting")
+		return "Resync: " .. tostring(kv.resyncstatus or "waiting")
 			.. ". Open Resync... for the host save and restart instructions. Closing the window does not resume play."
 	end
 	local state, who, what = CM.verdictWords(kv.verdict)

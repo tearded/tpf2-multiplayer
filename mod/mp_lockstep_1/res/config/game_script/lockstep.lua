@@ -1182,8 +1182,6 @@ function data()
 				local own = K.INSTANCE or "a"
 				local ownKv = readDash(own)
 				local ownWall = ownKv and tonumber(ownKv.wall) or nil
-				local okRecovery, errRecovery = pcall(CM.resyncGuiTick, ownKv)
-				if not okRecovery then print("[ls-gui] resync: " .. tostring(errRecovery)) end
 				if CM.desyncReportTick then
 					local okR, errR = pcall(CM.desyncReportTick, ownKv)
 					if not okR then print("[ls-gui] desync report: " .. tostring(errR)) end
@@ -1268,6 +1266,9 @@ function data()
 						CM.dashShowCompanies = not CM.dashShowCompanies
 						pcall(function() D.coBox:setVisible(CM.dashShowCompanies, false) end)
 					end))
+					-- the Resync section (resync.lua): first, so it stands out while every
+					-- other block is hidden; it is empty and hidden until a desync
+					box:addItem(CM.resyncSection())
 					local togC = api.gui.comp.Component.new("mpToggles")
 					togC:setLayout(tog)
 					box:addItem(togC)
@@ -1414,10 +1415,6 @@ function data()
 						D.chatBox:setVisible(CM.dashShowChat, false)
 						D.coBox:setVisible(CM.dashShowCompanies, false)
 					end)
-					local recovery = api.gui.comp.Button.new(api.gui.comp.TextView.new("  Resync...  "), true)
-					recovery:onClick(function() CM.resyncShow() end)
-					box:addItem(recovery)
-					D.resyncButton = recovery
 					local body = api.gui.comp.Component.new("mpDashboard")
 					body:setLayout(box)
 					D.win = api.gui.comp.Window.new("Multiplayer", body)
@@ -1439,7 +1436,8 @@ function data()
 					end
 				end
 				local mine = fresh[own]
-				D.resyncButton:setEnabled(mine ~= nil and (mine.resync == "1" or (tonumber(mine.desyncs) or 0) > 0))
+				local okRecovery, recoveryActive = pcall(CM.resyncGuiTick, ownKv)
+				if not okRecovery then print("[ls-gui] resync: " .. tostring(recoveryActive)); recoveryActive = false end
 				-- the verdict and, per peer, our verdict against that peer
 				local vs = {}
 				for o, info in pairs(peerInfo) do vs[#vs + 1] = o .. " " .. tostring(info.verdict) end
@@ -1479,13 +1477,16 @@ function data()
 					end
 				end)
 				-- Ctrl+Shift+D (caught by the menu DLL's keyboard hook) flips a
-				-- one-byte file; no file means shown.
+				-- one-byte file; no file means shown. A desync or a running resync
+				-- shows the window regardless: the Resync section is the only
+				-- in-game recovery view (2026-09-14).
 				local shown = true
 				local ff = io.open(K.BASE .. "tpf2mp_dash.txt", "r")
 				if ff then
 					local v = ff:read("*l"); ff:close()
 					shown = (v ~= "0")
 				end
+				if recoveryActive == true then shown = true end
 				if D.shown ~= shown then
 					D.shown = shown
 					D.win:setVisible(shown, false)

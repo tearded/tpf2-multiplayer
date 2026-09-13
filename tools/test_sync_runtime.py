@@ -107,6 +107,26 @@ class RuntimeTests(unittest.TestCase):
         self.assertIsNone(self.runtime.tick())
         self.assertFalse((self.root/'tpf2_native_request.txt').exists())
 
+    def test_error_step_and_detail_reach_the_lua_control_file(self):
+        self.phase('holding')
+        control = read_fields(self.root/'tpf2_sync_lua.txt')
+        self.assertEqual((control['step'], control['detail']), ('', ''))
+        self.state['error'] = {'step': 'checking', 'detail': 'Fresh worlds\r\ndiffer: ' + 'x' * 500}
+        self.phase('error')
+        control = read_fields(self.root/'tpf2_sync_lua.txt')
+        self.assertEqual(control['step'], 'checking')
+        self.assertTrue(control['detail'].startswith('Fresh worlds differ: xxx'))
+        self.assertEqual(len(control['detail']), 400)
+        self.state['error'] = None
+
+    def test_temporary_names_are_unique_and_removed(self):
+        stale = self.root/'tpf2_sync_lua.txt.sync.tmp'
+        stale.write_text('pid=999\n')
+        self.phase('holding')
+        self.phase('saving')
+        self.assertEqual(read_fields(self.root/'tpf2_sync_lua.txt')['phase'], 'saving')
+        self.assertEqual([p.name for p in self.root.glob('*.tmp')], [stale.name])
+
     def test_control_wire_format_is_lf_on_windows(self):
         self.phase('holding')
         raw = (self.root/'tpf2_sync_lua.txt').read_bytes()

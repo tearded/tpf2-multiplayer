@@ -118,7 +118,8 @@ local function readPending(sid)
 	if not f then return nil end
 	local session, why, t, n = f:read("*l"), f:read("*l"), f:read("*l"), f:read("*l")
 	f:close()
-	if session ~= sid then os.remove(pendingPath()); return nil end
+	-- the game's Lua has no os.remove (io.lua): an emptied file reads as absent
+	if session ~= sid then CM.clearFile(pendingPath()); return nil end
 	if not why or not tonumber(t) or not tonumber(n) then return nil end
 	return {why=why, t=tonumber(t), n=tonumber(n), session=session}
 end
@@ -134,7 +135,7 @@ end
 
 local function clearPending()
 	CM.desyncPending = nil
-	os.remove(pendingPath())
+	CM.clearFile(pendingPath())
 end
 
 function CM.desyncPopup(info)

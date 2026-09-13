@@ -98,7 +98,8 @@ with tempfile.TemporaryDirectory() as temporary:
         assert state['error']['step'] == 'checking'
         assert runtimes['host'].saves == 2
         runtimes['client'].mismatch = False
-        command('client', cmd='sync_retry', id='retry', operation=operation)
+        # through tpf2_sync_request.txt, as the Multiplayer window's Retry button writes it
+        runtimes['client']._write('tpf2_sync_request.txt', dict(cmd='sync_retry', id='retry', operation=operation))
         wait_for(lambda: all(r.finished and r.state['epoch'] != epoch for r in runtimes.values()))
         assert runtimes['host'].saves == 2
         assert all(r.state['operation'] == operation and r.loads == 3 for r in runtimes.values())

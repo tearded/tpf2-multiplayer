@@ -10,13 +10,20 @@ the freshly loaded, paused worlds. It resumes only after the shared comparison
 succeeds. The host's previous speed is restored, including an intentional pause.
 Changes present only on the client are replaced by the host's world.
 
-The native Multiplayer status window shows progress. During native saving and
-loading, the custom overlay stops drawing; the game's own loading screen remains.
-Closing the status window only collapses it. **Retry** is available
-after a failure and reuses a completed, verified snapshot when one exists.
-**Cancel** retains the hold. To abandon recovery entirely, exit both games
-normally and start a new lobby. Neither an error nor a timeout unpauses a diverged
-world. Log upload preferences remain independent of recovery.
+In the game, the **Resync** section at the top of the Multiplayer window shows
+the desync and offers **Resync now**; while a recovery runs it reports the
+phase, the failed step and its detail. The section shows the window even when
+Ctrl+Shift+D hid it and disappears once the worlds match again. There is no
+separate Lua popup any more. While the world is held, the native input gate
+swallows clicks on game widgets, so the compact native recovery panel appears
+for the hold and carries **Retry** after a failure (it reuses a completed,
+verified snapshot when one exists) and **Cancel**, which retains the hold.
+Closing that panel hides it until the next phase change; completion hides it.
+It no longer collapses to a "Multiplayer status" button. During native saving
+and loading, the custom overlay stops drawing; the game's own loading screen
+remains. To abandon recovery entirely, exit both games normally and start a
+new lobby. Neither an error nor a timeout unpauses a diverged world. Log
+upload preferences remain independent of recovery.
 
 ## Supported session
 
@@ -35,7 +42,8 @@ new session. Ordinary lobby start and save selection keep their existing flow.
   and fresh paused fingerprints, and retains the hold on errors or disconnects.
 - `sync_runtime.py` coordinates the local native and Lua adapters through
   PID-scoped files. Native commands require actual completion acknowledgements;
-  enqueueing is not saving or loading successfully.
+  enqueueing is not saving or loading successfully. `tpf2_sync_lua.txt` also
+  carries the failed step and detail for the Resync section.
 - `sync_snapshot.py` owns immutable save bytes, requires `.sav` and `.sav.lua`,
   includes `.jpg` when present and verifies SHA-256 throughout. Unique
   `mp_<epoch-prefix>` names never overwrite unrelated user saves.
@@ -47,7 +55,11 @@ new session. Ordinary lobby start and save selection keep their existing flow.
   script events before command creation. A FIFO pause fence drains earlier work.
 - `mp/resync.lua` runs before all simulation producers and stops GUI preview
   producers too. A newly loaded Lua state reports its own fresh world token.
-  A full paused world hash bypasses the normal running-only hash cadence.
+  A full paused world hash bypasses the normal running-only hash cadence. It
+  also owns the Resync section, whose Resync now goes through
+  `tpf2_sync_request.txt`. Control files are published under per-writer
+  temporary names so two lobby processes on one data folder cannot lose each
+  other's replacement.
 - `net.cpp` scopes data and ACKs to a world epoch. The bridge resets queues,
   partial packets and runtime command files together. A tail read begun before
   reset cannot enqueue into the new world. Epoch requests have a separate

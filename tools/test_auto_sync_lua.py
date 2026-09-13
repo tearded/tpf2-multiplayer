@@ -72,34 +72,52 @@ with TemporaryDirectory() as temporary:
     lua.execute('assert(CM.syncRequest("sync_request"))')
     request=(directory/'tpf2_sync_request.txt').read_text()
     assert request.startswith('pid=123\ncmd=sync_request\nid=') and request.endswith('\n')
-    # Actual GUI button callback; one click asks for automatic save/transfer/load.
+    # The Resync section of the Multiplayer window: real callbacks over widget stand-ins.
     lua.execute("""
         local function widget(text)
             return {text=text,visible=true,enabled=true,
                 setText=function(self,t) self.text=t end,
                 setEnabled=function(self,v) self.enabled=v end,
                 setVisible=function(self,v) self.visible=v end,
-                addHideOnCloseHandler=function(self) self.close=function() self.visible=false end end,
                 onClick=function(self,f) self.click=f end,
-                addItem=function() end,setLayout=function() end,setPosition=function() end}
+                addItem=function() end,setLayout=function() end}
         end
-        api={gui={comp={TextView={new=widget},Button={new=widget},Component={new=widget},Window={new=widget}},
+        api={gui={comp={TextView={new=widget},Button={new=widget},Component={new=widget}},
             layout={BoxLayout={new=widget}}}}
-        CM.resyncGuiTick({boot=tostring(os.time()),wall=tostring(os.time()),resynctoken='world',desyncs='1'})
-        assert(CM.resyncWin and CM.resyncButton.enabled)
+        function dash(t) t.boot=tostring(os.time()); t.wall=tostring(os.time()); t.resynctoken='world'; return t end
+        assert(CM.resyncSection() == CM.resyncBox and not CM.resyncBox.visible)
+        assert(not CM.resyncGuiTick(dash({desyncs='0'})) and not CM.resyncBox.visible)
+        -- a desync without an operation: only Resync now
+        assert(CM.resyncGuiTick(dash({desyncs='1'})) and CM.resyncBox.visible)
+        assert(CM.resyncText.text:find('out of sync', 1, true))
+        assert(CM.resyncButton.visible and CM.resyncButton.enabled)
         CM.resyncButton.click()
+        assert(not CM.resyncButton.enabled and CM.resyncText.text:find('requested', 1, true))
+        CM.resyncGuiTick(dash({desyncs='1'}))
         assert(not CM.resyncButton.enabled)
     """)
     clicked=(directory/'tpf2_sync_request.txt').read_text()
-    assert clicked != request and 'cmd=sync_request\n' in clicked
-    lua.execute('CM.resyncWin.close()')
-    assert (directory/'tpf2_sync_request.txt').read_text()==clicked
+    assert clicked != request and 'cmd=sync_request\n' in clicked and 'operation=' not in clicked
+    # While the world is held the section only reports (the native gate swallows
+    # its clicks): no button, phase text from the control file, error step and detail.
+    control(9, 'transferring')
     lua.execute("""
-        CM.resyncGuiTick({boot=tostring(os.time()),wall=tostring(os.time()),resynctoken='world',resync='1',resyncstatus='loading'})
-        assert(not CM.resyncWin.visible)
-        CM.resyncGuiTick({boot=tostring(os.time()),wall=tostring(os.time()),resynctoken='world',desyncs='0'})
-        assert(not CM.resyncWin.visible)
-        CM.resyncGuiTick({boot=tostring(os.time()),wall=tostring(os.time()),resynctoken='world',desyncs='1'})
-        assert(CM.resyncWin.visible)
+        assert(CM.resyncGuiTick(dash({desyncs='1',resync='1',resyncstatus='transferring'})))
+        assert(CM.resyncText.text:find('Transferring the save', 1, true) and not CM.resyncButton.visible)
     """)
-print('PASS: real Lua 5.2 producer hold, fresh paused comparison, stale/partial IPC, PID guard, pause preservation and one-click GUI; engine simulated')
+    control(10, 'error', step='checking', detail='Fresh worlds differ')
+    lua.execute("""
+        assert(CM.resyncGuiTick(dash({desyncs='1',resync='1',resyncstatus='error'})))
+        assert(CM.resyncText.text:find('World comparison failed', 1, true) and CM.resyncText.text:find('Fresh worlds differ', 1, true))
+        assert(CM.resyncText.text:find('Multiplayer Resync panel', 1, true) and not CM.resyncButton.visible)
+    """)
+    assert (directory/'tpf2_sync_request.txt').read_text() == clicked
+    control(11, 'complete')
+    lua.execute("""
+        assert(not CM.resyncGuiTick(dash({desyncs='0'})) and not CM.resyncBox.visible)
+        -- a stale dash keeps the last view instead of flipping it
+        assert(not CM.resyncGuiTick({desyncs='1'}))
+        -- a later desync in the same world offers Resync now again
+        assert(CM.resyncGuiTick(dash({desyncs='1'})) and CM.resyncButton.visible and CM.resyncButton.enabled)
+    """)
+print('PASS: real Lua 5.2 producer hold, fresh paused comparison, stale/partial IPC, PID guard, pause preservation and the Resync section of the Multiplayer window; engine simulated')

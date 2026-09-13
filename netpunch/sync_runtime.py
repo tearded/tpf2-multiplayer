@@ -5,6 +5,7 @@ module never discovers saves or drives menus. Its file interface is also usable
 by deterministic tests; those tests do not replace real engine acceptance tests.
 """
 from pathlib import Path
+import itertools
 import os
 import re
 import time
@@ -22,12 +23,19 @@ def read_fields(path):
     return dict(line.split('=', 1) for line in data.splitlines() if '=' in line)
 
 
+_temporary_counter = itertools.count()
+
+
 def write_fields(path, fields):
     path = Path(path)
     data = ''.join(f'{key}={value}\n' for key, value in fields.items())
     if any('\n' in str(v) or '\r' in str(v) for v in fields.values()):
         raise ValueError('invalid control field')
-    temporary = path.with_name(path.name + '.sync.tmp')
+    # One temporary per writer and call: a shared ".sync.tmp" let a second writer
+    # (another lobby process on the same data folder) truncate or move this one's
+    # file between write and replace, and the replace failed with ENOENT during a
+    # real transfer (2026-09-14, "No such file or directory: ...sync.tmp").
+    temporary = path.with_name(f'{path.name}.{os.getpid()}.{next(_temporary_counter)}.sync.tmp')
     # Match the native/Lua wire format on Windows as well: no CRLF translation.
     with temporary.open('w', encoding='utf-8', newline='\n') as stream:
         stream.write(data)
@@ -91,6 +99,9 @@ class SyncParticipant:
         fields = {k: self.state[k] for k in ('operation', 'epoch', 'revision', 'phase')}
         fields['digest'] = (self.state.get('snapshot') or {}).get('digest', '')
         fields['resume_speed'] = self.state.get('resume_speed') or 0
+        error = self.state.get('error') or {}
+        fields['step'] = str(error.get('step') or '')[:24]
+        fields['detail'] = ' '.join(str(error.get('detail') or '').split())[:400]
         self._write('tpf2_sync_lua.txt', fields)
 
     def _lua(self):

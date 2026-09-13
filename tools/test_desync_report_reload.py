@@ -6,8 +6,9 @@ from tempfile import TemporaryDirectory
 from lupa.lua52 import LuaRuntime
 
 
-SOURCE = (Path(__file__).resolve().parents[1] /
-          'mod/mp_lockstep_1/res/scripts/mp/desyncreport.lua').read_text(encoding='utf-8')
+MOD = Path(__file__).resolve().parents[1] / 'mod/mp_lockstep_1/res/scripts/mp'
+SOURCE = (MOD / 'desyncreport.lua').read_text(encoding='utf-8')
+IO_SOURCE = (MOD / 'io.lua').read_text(encoding='utf-8')   # CM.clearFile: the game's os has no remove
 
 
 def world(directory, *, desyncs=0, held=False):
@@ -31,9 +32,16 @@ def world(directory, *, desyncs=0, held=False):
                 desyncs=n,verdict='DESYNC vs a',resync=held and '1' or nil})
         end
     ''')
+    lua.execute('os.remove=nil; os.rename=nil')   # the game's cut-down os table (io.lua, 0.4.11)
+    lua.execute(IO_SOURCE)(lua.globals().CM, lua.globals().K, lambda _: None)
     lua.execute(SOURCE)(lua.globals().CM, lua.globals().K, lambda _: None)
     lua.globals().tick(desyncs, held)
     return lua
+
+
+def kept(path):
+    # an emptied file is how the mod removes one (io.lua); readers treat it as absent
+    return path.exists() and path.stat().st_size > 0
 
 
 with TemporaryDirectory() as temporary:
@@ -45,13 +53,13 @@ with TemporaryDirectory() as temporary:
     state.write_text('{"session":"abc123"}', encoding='utf-8')
 
     first = world(directory, desyncs=1)
-    assert pending.exists() and not inbox.exists()
+    assert kept(pending) and not inbox.exists()
     first.execute('assert(windows==1 and CM.desyncWin.visible); tick(0,true); assert(not CM.desyncWin.visible)')
     reloaded = world(directory, held=True)
     reloaded.execute('assert(windows==0); tick(0,false); assert(windows==1 and CM.desyncWin.visible)')
     assert not inbox.exists(), 'Restoring a question must not grant upload consent'
     reloaded.execute("buttons['  Only this once  '].click()")
-    assert not pending.exists()
+    assert not kept(pending)
     commands = [json.loads(line) for line in inbox.read_text(encoding='utf-8').splitlines()]
     assert len(commands) == 1 and commands[0]['cmd'] == 'upload_logs' and commands[0]['t'] == 432
     again = world(directory, desyncs=1)
@@ -62,7 +70,7 @@ with TemporaryDirectory() as temporary:
     state.write_text('{"session":"def456"}', encoding='utf-8')
     declined = world(directory, desyncs=1)
     declined.execute("buttons['  Never  '].click()")
-    assert not pending.exists() and 'desync_logs=never' in prefs.read_text(encoding='utf-8')
+    assert not kept(pending) and 'desync_logs=never' in prefs.read_text(encoding='utf-8')
     world(directory, desyncs=1).execute('assert(windows==0)')
 
     # Closing the question is not an answer; a failed IPC send is not an answer either.
@@ -72,14 +80,14 @@ with TemporaryDirectory() as temporary:
     closed.execute('CM.desyncWin.close(); assert(not CM.desyncWin.visible)')
     retried = world(directory)
     retried.execute("CM.netDir=function() return nil end; buttons['  Only this once  '].click(); assert(CM.desyncWin.visible)")
-    assert pending.exists()
+    assert kept(pending)
     retried.execute("CM.netDir=function() return base end; buttons['  Only this once  '].click()")
-    assert not pending.exists()
+    assert not kept(pending)
 
     # A pending question from another lobby must not be resurrected.
     pending.write_text('oldsession\nDESYNC\n432\n1\n', encoding='utf-8')
     world(directory).execute('assert(windows==0)')
-    assert not pending.exists()
+    assert not kept(pending)
 
     # An explicit Always send choice made while paused is honored on return.
     state.write_text('{"session":"bbb789"}', encoding='utf-8')
@@ -88,7 +96,7 @@ with TemporaryDirectory() as temporary:
     automatic = world(directory, held=True)
     before = inbox.read_text(encoding='utf-8')
     automatic.execute('assert(windows==0); tick(0,false); tick(0,false); assert(windows==0)')
-    assert not pending.exists()
+    assert not kept(pending)
     after = inbox.read_text(encoding='utf-8')
     assert len(after.splitlines()) == len(before.splitlines()) + 1
 

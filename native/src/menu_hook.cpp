@@ -411,7 +411,7 @@ static volatile LONG g_recoveryPresent = 0;
 static volatile LONG g_recoveryWorldIo = 0;
 static char g_recoveryOperation[40] = "", g_recoveryEpoch[40] = "";
 static char g_recoveryPhase[24] = "", g_recoveryDetail[420] = "", g_recoveryFailedStep[24] = "";
-static volatile LONG g_uiState = 0;     // 0 collapsed, 1 host/join choice, 2 lobby
+static volatile LONG g_uiState = 0;     // 0 collapsed, 1 host/join choice, 2 lobby, 3 recovery (title menu only)
 // Low-level keyboard hook. While the lobby chat is open (state 2) and the game is
 // focused, route typing into the chat box and SWALLOW the key so the game's own
 // bindings never fire -- crucially Enter, which on the title menu opens Load Game.
@@ -900,14 +900,15 @@ static void RenderPanelLayer(int w, int h)
     layerRect(0, 0, w, h, MW_BG, MW_BG_A);
     int pad = S(25), cy = S(56);
     const LONG page=InterlockedCompareExchange(&g_uiState,0,0);
-    if(page==4) {
-        mwButton(0,0,w,h,L"Multiplayer status",81);
-    } else if(page==3) {
+    if(page==3) {
         char phase[24],detail[420],failedStep[24];
         EnterCriticalSection(&g_modelCs);
         strcpy_s(phase,g_recoveryPhase); strcpy_s(detail,g_recoveryDetail); strcpy_s(failedStep,g_recoveryFailedStep);
         LeaveCriticalSection(&g_modelCs);
-        mwTitle(L"MULTIPLAYER RESYNC"); mwClose(w,80);
+        // No close button and no Esc while the world is held (user test 2026-09-14:
+        // Cancel, then close, left no way back -- the Lua window cannot be clicked
+        // under the input gate). Completion hides the panel.
+        mwTitle(L"MULTIPLAYER RESYNC");
         const wchar_t* label=L"Pausing both games";
         if(!strcmp(phase,"waiting")) label=L"Desync detected. Both games are paused.";
         else if(!strcmp(phase,"saving")) label=L"Saving the host world";
@@ -928,10 +929,12 @@ static void RenderPanelLayer(int w, int h)
         if(detail[0]) { wchar_t text[420]; MultiByteToWideChar(CP_UTF8,0,detail,-1,text,420);
             mwBody(pad,cy+S(42),w-2*pad,S(60),text,MW_DIM); }
         mwBody(pad,h-S(130),w-2*pad,S(40),L"The host world is used. Client-only changes will be lost.",MW_DIM);
+        // aborted: the hold remains and only a new request goes on (the barrier
+        // ignores Cancel there); it used to offer nothing but Cancel (user test 2026-09-14)
         if(!strcmp(phase,"error")) mwButton(pad,h-S(76),S(180),S(30),L"Retry",82);
-        else if(!strcmp(phase,"waiting") || !strcmp(phase,"complete"))
+        else if(!strcmp(phase,"waiting") || !strcmp(phase,"complete") || !strcmp(phase,"aborted"))
             mwButton(pad,h-S(76),S(210),S(30),L"Resync now",84);
-        if(strcmp(phase,"complete")) mwButton(w-pad-S(160),h-S(76),S(160),S(30),L"Cancel",83);
+        if(strcmp(phase,"complete") && strcmp(phase,"aborted")) mwButton(w-pad-S(160),h-S(76),S(160),S(30),L"Cancel",83);
         mwStatus(w,h);
     } else if (page == 2) {
         // ---------------- LOBBY ----------------
@@ -1256,14 +1259,12 @@ static bool CopyBackdrop(VkQueue q, uint32_t imgIndex)
 static void PanelLayout()
 {
     g_s = UiScale();
-    if (InterlockedCompareExchange(&g_uiState, 0, 0) == 4) { g_copyW = S(220); g_copyH = S(36); }
-    else if (InterlockedCompareExchange(&g_uiState, 0, 0) == 3) { g_copyW = S(520); g_copyH = S(300); }
+    if (InterlockedCompareExchange(&g_uiState, 0, 0) == 3) { g_copyW = S(520); g_copyH = S(300); }
     else if (InterlockedCompareExchange(&g_uiState, 0, 0) == 2) { g_copyW = S(780); g_copyH = S(540); }
     else                                                     { g_copyW = S(780); g_copyH = g_flagMaster[0] ? S(540) : S(300); }
     if (g_copyW > g_panelW) g_copyW = g_panelW; if (g_copyH > g_panelH) g_copyH = g_panelH;
     g_panelX = ((int)g_scExtent.width - g_copyW) / 2;
     g_panelY = ((int)g_scExtent.height - g_copyH) / 2;
-    if (g_uiState == 4) { g_panelX = S(20); g_panelY = S(20); }
 }
 
 static void DrawButton(VkQueue q, uint32_t imgIndex)
@@ -1404,8 +1405,6 @@ static void OnHit(int id)
             if (t) CloseHandle(t); else InterlockedExchange(&g_logsBusy, 0);
         }
         break;
-    case 80: InterlockedExchange(&g_uiState,4); InterlockedExchange(&g_panelDirty,1); break;
-    case 81: InterlockedExchange(&g_uiState,3); InterlockedExchange(&g_panelDirty,1); break;
     case 82: case 83: case 84: {
         char operation[40]; EnterCriticalSection(&g_modelCs); strcpy_s(operation,g_recoveryOperation); LeaveCriticalSection(&g_modelCs);
         static LONG requestNo = 0;
@@ -2520,12 +2519,18 @@ static DWORD WINAPI LobbyThread(LPVOID param)
                             LeaveCriticalSection(&g_modelCs);
                             SetStatus(!strcmp(phase,"complete") ? "Resync complete." : "");
                             InterlockedExchange(&g_recoveryPresent,1);
-                            if(fresh) InterlockedExchange(&g_uiState,3);
-
+                            // The compact panel is the recovery view while the world is
+                            // held: the native input gate swallows clicks on game widgets,
+                            // so the Multiplayer window's Resync section (resync.lua) can
+                            // only start a resync; Retry and Cancel are here, read through
+                            // the low-level mouse hook. The panel no longer collapses to a
+                            // "Multiplayer status" button: closing it or completing hides
+                            // it; it stays open, without a close button, while the world
+                            // is held (2026-09-14).
                             if(!strcmp(phase,"complete")) {
                                 InterlockedExchange(&g_lobbyDone,1);
-                                InterlockedExchange(&g_uiState,4);
-                            } else if(!strcmp(phase,"aborted")) {
+                                if(InterlockedCompareExchange(&g_uiState,0,0)==3) InterlockedExchange(&g_uiState,0);
+                            } else {
                                 InterlockedExchange(&g_uiState,3);
                             }
                             InterlockedExchange(&g_panelDirty,1);
@@ -2766,9 +2771,6 @@ static LRESULT CALLBACK LlKeyboard(int code, WPARAM wp, LPARAM lp)
 {
     if (code == HC_ACTION && (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN) && gameHasFocus()) {
         KBDLLHOOKSTRUCT* k0 = (KBDLLHOOKSTRUCT*)lp;
-        if (k0->vkCode == VK_ESCAPE && g_recoveryPresent && g_uiState == 3) {
-            InterlockedExchange(&g_uiState,4); InterlockedExchange(&g_panelDirty,1);
-        }
         if (k0->vkCode == 'D' && (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000)) {
             LONG now = InterlockedCompareExchange(&g_dashShown, 0, 0) ? 0 : 1;
             InterlockedExchange(&g_dashShown, now);
@@ -2863,6 +2865,14 @@ static void MyCreatePage(uint64_t thisp, int page)
         // start arriving while the title menu sat on another page looked like
         // "start while in game" and was ignored (relay resume, 2026-09-10).
         g_gameUi = 0;
+        // Back at the title menu with a recovery still open (a failed load): the
+        // game GUI's Resync section is gone, so the native panel takes over.
+        if (InterlockedCompareExchange(&g_recoveryPresent, 0, 0) && g_modelCsInit) {
+            EnterCriticalSection(&g_modelCs);
+            const bool open = g_recoveryPhase[0] != 0 && strcmp(g_recoveryPhase, "complete") != 0;
+            LeaveCriticalSection(&g_modelCs);
+            if (open) { InterlockedExchange(&g_uiState, 3); InterlockedExchange(&g_panelDirty, 1); }
+        }
     }
     else if (page >= 3) InterlockedExchange(&g_showOverlay, 0);
     static int seen = 0;

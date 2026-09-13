@@ -25,8 +25,14 @@ foreach ($publishedRelease in @($releaseList | Where-Object { -not $_.draft -and
 }
 gh release create $releaseTag --repo $env:GITHUB_REPOSITORY --verify-tag --draft --title "Fork $releaseVersion" --notes-file $notesOut installer/out/TpF2Multiplayer.msi installer/out/SHA256SUMS.txt installer/out/build-info.json
 if ($LASTEXITCODE -ne 0) { throw 'Creating the draft release failed' }
-$releaseData = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$releaseTag" | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0 -or -not $releaseData.draft) { throw 'Draft verification failed' }
+# The tag endpoint only returns published releases. Locate the authenticated
+# draft by its numeric ID before checking its assets.
+$draftList = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the created draft' }
+$createdDraft = @($draftList | Where-Object { $_.tag_name -eq $releaseTag -and $_.draft })
+if ($createdDraft.Count -ne 1) { throw 'Expected exactly one matching draft' }
+$releaseData = gh api "repos/$env:GITHUB_REPOSITORY/releases/$($createdDraft[0].id)" | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or -not $releaseData.draft -or $releaseData.tag_name -ne $releaseTag) { throw 'Draft verification failed' }
 $releaseAsset = @($releaseData.assets | Where-Object name -eq 'TpF2Multiplayer.msi')
 if ($releaseAsset.Count -ne 1 -or $releaseAsset[0].digest -ne "sha256:$releaseHash") { throw 'GitHub asset digest mismatch; release stays a draft' }
 $verifyFolder = Join-Path $env:RUNNER_TEMP ('release-verify-' + [Guid]::NewGuid().ToString('N'))

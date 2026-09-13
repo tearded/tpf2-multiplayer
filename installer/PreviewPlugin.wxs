@@ -1,0 +1,12 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Fragment>
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Directory Id="PreviewPluginsFolder" Name="plugins" />
+    </DirectoryRef>
+    <ComponentGroup Id="PreviewPlugin" Directory="PreviewPluginsFolder">
+      <Component Id="PreviewPluginDll">
+        <File Id="tpf2_previews.dll" Name="tpf2_previews.dll" Source="$(PreviewDll)" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

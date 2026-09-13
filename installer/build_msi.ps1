@@ -43,6 +43,10 @@ After building, extract the MSI with msiexec /a into a temp folder and list it.
 .PARAMETER AcceptWixEula
 Pass --acceptEula wix7 to wix for this run.
 
+.PARAMETER IncludePreviews
+Build and package tpf2_previews.dll when the optional preview sources and Lua
+integration are part of the checkout. CI checks that they are present together.
+
 .PARAMETER Version
 Package version (three-part). Defaults to the contents of installer\VERSION, which
 is the single source of truth for what a release is called -- every 0.1.x MSI up to
@@ -60,6 +64,7 @@ param(
     [switch]$SkipFreeze,
     [switch]$Validate,
     [switch]$AcceptWixEula,
+    [switch]$IncludePreviews,
     [ValidatePattern('^\d+\.\d+\.\d+$')]
     [string]$Version
 )
@@ -144,6 +149,13 @@ if ($SkipBuild) {
     $sliceDll = Build-Suffixable "slice" "tpf2_slice.dll"
 }
 $proxyDll = Join-Path $BridgeOut "alut.dll"
+if ($IncludePreviews) {
+    if (-not $SkipBuild) {
+        $rc = Run-Bat (Join-Path $Bridge 'build.bat') 'previews'
+        if ($rc -ne 0) { Fail 'Preview plugin build failed' }
+    }
+    if (-not (Test-Path (Join-Path $BridgeOut 'tpf2_previews.dll'))) { Fail 'Preview plugin DLL missing' }
+}
 $hostDll  = Join-Path $BridgeOut "tpf2_pluginhost.dll"
 foreach ($f in @($proxyDll, $hostDll, (Join-Path $BridgeOut "tpf2_bridge_mp.dll"), $menuDll, $sliceDll)) {
     if (-not (Test-Path $f)) { Fail "missing: $f" }
@@ -202,6 +214,9 @@ $wixArgs = @("build") + $eula + @(
     (Join-Path $Installer "PluginHost.wxs")
 )
 Say "wix $($wixArgs -join ' ')"
+if ($IncludePreviews) {
+    $wixArgs += @('-d', "PreviewDll=$(Join-Path $BridgeOut 'tpf2_previews.dll')", (Join-Path $Installer 'PreviewPlugin.wxs'))
+}
 Push-Location $Installer
 try {
     $wixOut = & $Wix @wixArgs 2>&1 | ForEach-Object { "$_" }

@@ -63,5 +63,5 @@ vcvars = root / 'tools' / 'msvc_env.bat'
 (out/'build.cmd').write_text(f'@echo off\ncall "{vcvars}" || exit /b 1\n'
     'cl /nologo /EHsc /W4 test.cpp /Fe:test.exe >build.log 2>&1\n'
     'if errorlevel 1 (type build.log & exit /b 1)\nexit /b 0\n')
-subprocess.run(['cmd','/d','/c','build.cmd'], cwd=out, check=True, timeout=180)
+subprocess.run(['cmd','/d','/c',str(out/'build.cmd')], cwd=out, check=True, timeout=180)  # absolute: a relative name fails on some shells
 subprocess.run([str(out / 'test.exe')], cwd=out, check=True, timeout=20)

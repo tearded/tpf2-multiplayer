@@ -78,5 +78,5 @@ vcvars = root / 'tools' / 'msvc_env.bat'
     'exit /b 0\n', encoding='utf-8')
 # Initial toolchain discovery can take longer on a cold hosted runner. Keep
 # execution separately bounded so a compiler timeout cannot hide a hung test.
-subprocess.run(['cmd', '/d', '/c', 'build.cmd'], cwd=out, check=True, timeout=180)
+subprocess.run(['cmd', '/d', '/c', str(out / 'build.cmd')], cwd=out, check=True, timeout=180)  # absolute: a relative name fails on some shells
 subprocess.run([str(out / 'test.exe')], cwd=out, check=True, timeout=30)

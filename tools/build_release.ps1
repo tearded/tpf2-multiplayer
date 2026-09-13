@@ -2,6 +2,8 @@
 [CmdletBinding()]
 param()
 $ErrorActionPreference = 'Stop'
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
 $repoRoot = Split-Path $PSScriptRoot -Parent
 Set-Location $repoRoot
 $packageVersion = (Get-Content installer/VERSION -Raw).Trim()

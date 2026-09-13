@@ -41,6 +41,8 @@ gh release download $releaseTag --repo $env:GITHUB_REPOSITORY --pattern TpF2Mult
 if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath (Join-Path $verifyFolder 'TpF2Multiplayer.msi')).Hash.ToLowerInvariant() -ne $releaseHash) { throw 'Release download verification failed; release stays a draft' }
 gh release edit $releaseTag --repo $env:GITHUB_REPOSITORY --draft=false --latest
 if ($LASTEXITCODE -ne 0) { throw 'Publishing the verified draft failed' }
-$activeRelease = Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/latest"
-if ($activeRelease.tag_name -ne $releaseTag -or @($activeRelease.assets | Where-Object { $_.name -eq 'TpF2Multiplayer.msi' -and $_.digest -eq "sha256:$releaseHash" }).Count -ne 1) { throw 'Public launcher feed verification failed' }
+# Hosted runner IPs share the small anonymous API quota. Use the job token for
+# this read; /releases/latest still excludes drafts and prereleases.
+$activeRelease = gh api "repos/$env:GITHUB_REPOSITORY/releases/latest" | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $activeRelease.draft -or $activeRelease.prerelease -or $activeRelease.tag_name -ne $releaseTag -or @($activeRelease.assets | Where-Object { $_.name -eq 'TpF2Multiplayer.msi' -and $_.digest -eq "sha256:$releaseHash" }).Count -ne 1) { throw 'Public launcher feed verification failed' }
 "Launcher release **$releaseVersion** is available: $($activeRelease.html_url)" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY

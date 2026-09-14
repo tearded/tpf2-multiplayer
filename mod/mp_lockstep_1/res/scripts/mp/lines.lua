@@ -175,7 +175,9 @@ function CM.lineSnapshot(lid)
 			local cc = api.engine.getComponent(lid, api.type.ComponentType.COLOR)
 			if cc and cc.color then r, g, b = cc.color.x or cc.color[1], cc.color.y or cc.color[2], cc.color.z or cc.color[3] end
 		end)
-		snap = { name = CM.escName(name), color = string.format("%.3f,%.3f,%.3f", r, g, b),
+		-- the colour EXACTLY (%.9g round-trips a float): a peer's next new line is
+		-- coloured by an exact match against the existing lines' colours (LCREATEX)
+		snap = { name = CM.escName(name), color = string.format("%.9g,%.9g,%.9g", r, g, b),
 		         wait = tonumber(lc.waitingTime) or 180, stops = table.concat(stops, ";"),
 		         alts = table.concat(alts, ";") }
 	end)
@@ -254,6 +256,58 @@ function CM.mergeLineEdit(baseS, baseA, clickS, clickA, pendS, pendA)
 	return table.concat(P, ";"), table.concat(PA, ";"), adds, dels, sets
 end
 
+-- How many single-stop changes turn one list into the other (stop identity as in
+-- mergeLineEdit: position + station + terminal): additions plus removals.
+local function lineDistance(aS, bS)
+	local na, nb = lineCount(aS), lineCount(bS)
+	local A, B = lineSplit(aS, na), lineSplit(bS, nb)
+	local L = {}
+	for i = na + 1, 1, -1 do
+		L[i] = {}
+		for j = nb + 1, 1, -1 do
+			if i > na or j > nb then L[i][j] = 0
+			elseif stopKey(A[i]) == stopKey(B[j]) then L[i][j] = L[i + 1][j + 1] + 1
+			else L[i][j] = math.max(L[i + 1][j], L[i][j + 1]) end
+		end
+	end
+	return na + nb - 2 * L[1][1]
+end
+CM.lineDistance = lineDistance
+
+-- THE LIST A CLICK WAS BUILT FROM (2026-09-12). The line editor builds each click
+-- from the list IT last saw, and an update can land between the click and the
+-- moment the Lua reads it. Diffing the click against the entity's list then read
+-- "stop 1 removed, stop 3 added" for a click that only added stop 3, and the merge
+-- deleted stop 1 (b:6: three quick stations applied as 1, 2, 2 stops). So every
+-- applied update records the list before and after it, and a click's base is the
+-- NEWEST recent list it is at most one change away from (one click is one change:
+-- an add, a removal or a re-set); failing that, the closest, newest first.
+-- Newest first keeps "remove the stop just added" a removal, not a no-op.
+function CM.lineHistNote(key, stops, alts)
+	if not key then return end
+	CM.lineHist = CM.lineHist or {}
+	local h = CM.lineHist[key] or {}
+	h[#h + 1] = { stops = stops or "", alts = alts or "", t = CM.gameTime() or 0 }
+	while #h > 12 do table.remove(h, 1) end
+	CM.lineHist[key] = h
+end
+function CM.lineBaseFor(key, clickS, snap)
+	local cands = {}
+	if snap and snap.stops then cands[#cands + 1] = snap end
+	local now = CM.gameTime() or 0
+	local h = (CM.lineHist or {})[key] or {}
+	for k = #h, 1, -1 do
+		if now - (h[k].t or 0) <= 8 then cands[#cands + 1] = h[k] end
+	end
+	local best, bestD
+	for _, cand in ipairs(cands) do
+		local d = lineDistance(cand.stops, clickS)
+		if d <= 1 then return cand end
+		if not bestD or d < bestD then best, bestD = cand, d end
+	end
+	return best or snap
+end
+
 -- The newest update for `key` that may not show on the entity yet: one still
 -- queued (any origin), or one of ours captured in the last few game units.
 function CM.linePending(key)
@@ -313,8 +367,10 @@ function CM.pollLineKeys()
 		table.remove(CM.pendingLineCreates, 1)
 		local snap = CM.lineSnapshot(lid)
 		if snap then
+			-- armed=0: this line was created natively here (not decoded, or no live
+			-- session when it was made), so this instance must not create it again
 			CM.scheduleLocal("LCREATE", { name = snap.name, color = snap.color, wait = snap.wait,
-			                           stops = snap.stops, skipOrigin = 1 })
+			                           stops = snap.stops, skipOrigin = 1, armed = 0 })
 			registerLineKey(K.INSTANCE .. ":" .. tostring(CM.seqNo), lid)
 		else
 			knownLines[lid] = true
@@ -426,9 +482,9 @@ local function retryLineDep(c)
 end
 
 function CM.execLine(c)
-	-- LCREATE is never cancelled (the editor's UpdateLine(-1) on a cancelled
-	-- create is a fatal assert), so the originator always skips it. LUPDATE /
-	-- LDELETE replay here too when the slice cancelled them (armed=1).
+	-- LCREATE / LUPDATE / LDELETE replay on the originator too when the slice
+	-- cancelled them (armed=1). A cancelled LCREATE is the line editor's create,
+	-- decoded (LCREATEX); the old read-back path ships armed=0 and is skipped here.
 	if c.origin == K.INSTANCE and (not K.STRICT_OPS[c.op] or tonumber(c.armed or 1) == 0) then
 		log(string.format("%s seq=%s: originator already applied locally, skipping", c.op, tostring(c.seq)))
 		return
@@ -443,16 +499,44 @@ function CM.execLine(c)
 			local color = api.type.Vec3f.new(tonumber(r) or 0.9, tonumber(g) or 0.2, tonumber(b) or 0.2)
 			local name = CM.unescName(c.name)
 			local key = tostring(c.origin) .. ":" .. tostring(c.seq)
+			local keyed = false
+			local function expectKey()
+				if keyed then return end
+				keyed = true
+				pendingLineKeys[#pendingLineKeys + 1] = { key = key, sig = c.stops, since = CM.gameTime() or 0, company = c.company and tonumber(c.company) or nil }
+			end
+			if c.origin == K.INSTANCE then
+				-- STRICT: the player's own create was cancelled. Claim this createLine so
+				-- the slice hands its Add the line editor's held callback -- which then
+				-- REPLACES ours, so the key is expected now rather than in our callback.
+				-- the slice takes a claim only when it differs from the last one and was
+				-- written seconds ago: seeded from the clock so a reloaded save's first
+				-- claim never repeats the previous session's in the same game process
+				CM.lclaimSeq = (CM.lclaimSeq or (os.time() % 100000000) * 10) + 1
+				pcall(function()
+					local f = io.open(K.BASE .. "lockstep_lclaim_" .. K.INSTANCE .. ".txt", "w")
+					if f then f:write(tostring(CM.lclaimSeq)); f:close() end
+				end)
+				expectKey()
+				log(string.format("EXEC LCREATE seq=%s origin=%s at=%s '%s' stops=%d -- created at the stamp here too (the line editor's callback takes the result)",
+					tostring(c.seq), tostring(c.origin), tostring(c.at), name, n))
+			end
 			api.cmd.sendCommand(api.cmd.make.createLine(name, color, api.engine.util.getPlayer(), lineObj),
 				function(res, success)
 					log(string.format("EXEC LCREATE seq=%s origin=%s at=%s '%s' stops=%d success=%s",
 						tostring(c.seq), tostring(c.origin), tostring(c.at), name, n, tostring(success)))
-					if success then pendingLineKeys[#pendingLineKeys + 1] = { key = key, sig = c.stops, since = CM.gameTime() or 0, company = c.company and tonumber(c.company) or nil } end
+					if success then expectKey() end
 				end)
 		elseif c.op == "LUPDATE" then
 			local lid = CM.lineIdFor(c.key)
 			if not lid then retryLineDep(c); return end
 			local lineObj, n = buildLineObject(c)
+			-- the lists the line editor may still be showing (CM.lineBaseFor)
+			pcall(function()
+				local pre = CM.lineSnapshot(lid)
+				if pre and pre.stops then CM.lineHistNote(c.key, pre.stops, pre.alts) end
+				CM.lineHistNote(c.key, c.stops or "", c.alts or "")
+			end)
 			api.cmd.sendCommand(api.cmd.make.updateLine(lid, lineObj), function(res, success)
 				log(string.format("EXEC LUPDATE seq=%s origin=%s at=%s %s stops=%d success=%s",
 					tostring(c.seq), tostring(c.origin), tostring(c.at), tostring(c.key), n, tostring(success)))

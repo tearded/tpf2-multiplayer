@@ -255,6 +255,62 @@ function CM.conxContext()
 	return nil
 end
 
+-- STOPS AND SIGNALS RIDE ALONG A REPLACED EDGE (2026-09-12). Upgrading a street
+-- (tram tracks, bus lane, type) is a removal of each edge plus a new edge between
+-- the same two nodes. The engine's own upgrade lists the old edge's objects on the
+-- new one under their real ids (an id >= 0 is re-parented: the stop, its station
+-- group and its lines stay -- stops.lua, NATIVE-SHAPE STOP REPLAY). The replay
+-- listed none, so every stop on an upgraded street was left on a dead edge, and
+-- the catchment update dereferenced it on the next step: an access violation in
+-- station_util::GetTerminalPersonEdges on all three games at once (step 46710).
+-- Returns true and the number carried, or false and why: an edge with objects
+-- that nothing replaces one for one (split, rerouted) is not something the replay
+-- can build safely, and the caller skips the command -- identically everywhere,
+-- since every instance has the same stops.
+function CM.carryEdgeObjects(removeEdges, addEdges)
+	local carried = 0
+	for _, rid in ipairs(removeEdges) do
+		local objs, n = CM.objectsOnEdge(rid)
+		if (n or 0) > 0 then
+			if not objs then
+				return false, string.format("edge %d: its %d stop(s)/signal(s) could not be read", rid, n or -1)
+			end
+			local a, b
+			pcall(function()
+				local be = api.engine.getComponent(rid, api.type.ComponentType.BASE_EDGE)
+				a, b = be.node0, be.node1
+			end)
+			local hit, reversed
+			for _, e in ipairs(addEdges) do
+				local n0, n1
+				pcall(function() n0, n1 = e.comp.node0, e.comp.node1 end)
+				if a and n0 == a and n1 == b then hit, reversed = e, false; break end
+				if a and n0 == b and n1 == a then hit, reversed = e, true end
+			end
+			if not hit then
+				return false, string.format("edge %d carries %d stop(s)/signal(s) and no new edge replaces it one for one (a split or a reroute)", rid, n)
+			end
+			if reversed then
+				-- the objects' side and position are in the OLD edge's frame: build the
+				-- new edge in that direction (same curve, tangents reversed and swapped)
+				local t0, t1 = hit.comp.tangent0, hit.comp.tangent1
+				local x0, y0, z0 = t0.x or t0[1], t0.y or t0[2], t0.z or t0[3]
+				local x1, y1, z1 = t1.x or t1[1], t1.y or t1[2], t1.z or t1[3]
+				hit.comp.node0, hit.comp.node1 = a, b
+				hit.comp.tangent0 = api.type.Vec3f.new(-x1, -y1, -z1)
+				hit.comp.tangent1 = api.type.Vec3f.new(-x0, -y0, -z0)
+			end
+			local list = {}
+			for _, o in ipairs(objs) do list[#list + 1] = { o[1], o[2] } end
+			hit.comp.objects = list
+			carried = carried + #list
+			log(string.format("ROADP: edge %d's %d stop(s)/signal(s) carried onto its replacement %d->%d%s",
+				rid, #list, a, b, reversed and " (built in the old edge's direction)" or ""))
+		end
+	end
+	return true, carried
+end
+
 function CM.execEdge(c)
 	local isRail = (c.op == "RAIL")
 	local ok, err = pcall(function()
@@ -1308,33 +1364,38 @@ function CM.execPolyline(c, planOnly)
 		-- remain in its own network: ROADE's primary kind belongs to the new road.
 		-- br names these unchanged spans by endpoint positions and bridge model;
 		-- local ids, properties, objects and orientation come from this peer.
-		for entry in tostring(c.br or ""):gmatch("[^;]+") do
-			local f = {}
-			for token in entry:gmatch("[^,]+") do
-				local value = tonumber(token)
-				if not value then error("ROADP: malformed bridge companion") end
-				f[#f + 1] = value
-			end
-			if #f ~= 7 then error("ROADP: malformed bridge companion") end
-			local eid = CM.findEdgeByEnds(not isTrack, f[1], f[2], f[4], f[5], 0.01)
-			local be, p0, p1 = nil, nil, nil
-			if eid then be, p0, p1 = CM.edgeGeomT(eid) end
-			local function matches(p, offset)
-				return p and math.abs(p[1] - f[offset]) < 0.01
-					and math.abs(p[2] - f[offset + 1]) < 0.01 and math.abs(p[3] - f[offset + 2]) < 0.01
-			end
-			if not be or be.type ~= 1 or be.typeIndex ~= f[7]
-				or not ((matches(p0, 1) and matches(p1, 4)) or (matches(p0, 4) and matches(p1, 1))) then
-				error("ROADP: bridge companion no longer matches this world")
-			end
-			if dropEdge(eid) then
-				local e = newEdge()
-				e.comp.node0, e.comp.node1 = be.node0, be.node1
-				e.comp.tangent0, e.comp.tangent1 = be.tangent0, be.tangent1
-				e.comp.objects = be.objects
-				e.type = isTrack and 0 or 1
-				CM.copyEdgeProps(e, eid, not isTrack, nil)
-				addEdges[#addEdges + 1] = e
+		-- bs is the same record for a span of the command's OWN network (a road under
+		-- a road bridge): replayed as a link it took the new road's street type.
+		for _, companions in ipairs({ { list = c.br, track = not isTrack }, { list = c.bs, track = isTrack } }) do
+			local spanTrack = companions.track
+			for entry in tostring(companions.list or ""):gmatch("[^;]+") do
+				local f = {}
+				for token in entry:gmatch("[^,]+") do
+					local value = tonumber(token)
+					if not value then error("ROADP: malformed bridge companion") end
+					f[#f + 1] = value
+				end
+				if #f ~= 7 then error("ROADP: malformed bridge companion") end
+				local eid = CM.findEdgeByEnds(spanTrack, f[1], f[2], f[4], f[5], 0.01)
+				local be, p0, p1 = nil, nil, nil
+				if eid then be, p0, p1 = CM.edgeGeomT(eid) end
+				local function matches(p, offset)
+					return p and math.abs(p[1] - f[offset]) < 0.01
+						and math.abs(p[2] - f[offset + 1]) < 0.01 and math.abs(p[3] - f[offset + 2]) < 0.01
+				end
+				if not be or be.type ~= 1 or be.typeIndex ~= f[7]
+					or not ((matches(p0, 1) and matches(p1, 4)) or (matches(p0, 4) and matches(p1, 1))) then
+					error("ROADP: bridge companion no longer matches this world")
+				end
+				if dropEdge(eid) then
+					local e = newEdge()
+					e.comp.node0, e.comp.node1 = be.node0, be.node1
+					e.comp.tangent0, e.comp.tangent1 = be.tangent0, be.tangent1
+					e.comp.objects = be.objects
+					e.type = spanTrack and 1 or 0
+					CM.copyEdgeProps(e, eid, spanTrack, nil)
+					addEdges[#addEdges + 1] = e
+				end
 			end
 		end
 
@@ -1362,6 +1423,20 @@ function CM.execPolyline(c, planOnly)
 			end
 		end
 		addEdges = keep
+
+		-- Stops and signals on a removed edge ride along to its replacement BEFORE
+		-- the edges are copied into the proposal (CM.carryEdgeObjects). The plan
+		-- pass builds nothing, so it does not need them.
+		if not planOnly then
+			local okC, carried = CM.carryEdgeObjects(removeEdges, addEdges)
+			if not okC then
+				local msg = string.format("ROADP seq=%s: %s -- COMMAND SKIPPED on every instance "
+					.. "(a stop left on a removed edge crashes the engine)", tostring(c.seq), tostring(carried))
+				log(msg)
+				CM.cmLog(msg)
+				return
+			end
+		end
 
 		for i, n in ipairs(addNodes) do sp.streetProposal.nodesToAdd[i] = n end
 		for i, e in ipairs(addEdges) do sp.streetProposal.edgesToAdd[i] = e end
@@ -1493,6 +1568,55 @@ function CM.execPolyline(c, planOnly)
 									end
 								end
 								CM.cmLog("XING: errorState fields: " .. table.concat(ef, " | "))
+							end)
+							-- COLLISIONS live beside errorState, in collisionInfo, not in it.
+							-- A critical refusal with an empty message list (parallel track
+							-- at a level crossing, 2026-09-11: a proposal identical to the
+							-- originator's native one, node for node and tangent for tangent)
+							-- left nothing to go on. Name every colliding entity: kind,
+							-- position, and for an edge its end nodes.
+							pcall(function()
+								local ci = pd.collisionInfo
+								if not ci then CM.cmLog("XING: collisionInfo: absent"); return end
+								local function list(v)
+									local out = {}
+									if v == nil then return out end
+									pcall(function() for j = 1, 32 do local x = v[j]; if x == nil then break end; out[#out + 1] = x end end)
+									if #out == 0 then pcall(function() for _, x in pairs(v) do out[#out + 1] = x; if #out >= 32 then break end end end) end
+									return out
+								end
+								local function describe(id)
+									local d = tostring(id)
+									pcall(function()
+										local n = tonumber(id)
+										if not n then return end
+										local be = api.engine.getComponent(n, api.type.ComponentType.BASE_EDGE)
+										if be then
+											local tr = api.engine.getComponent(n, api.type.ComponentType.BASE_EDGE_TRACK) ~= nil
+											local p0, p1 = CM.nodePosXYZ(be.node0), CM.nodePosXYZ(be.node1)
+											d = string.format("%d=%s edge %d->%d (%.1f,%.1f,%.2f)-(%.1f,%.1f,%.2f)", n, tr and "TRACK" or "street",
+												be.node0, be.node1, p0 and p0[1] or 0, p0 and p0[2] or 0, p0 and p0[3] or 0,
+												p1 and p1[1] or 0, p1 and p1[2] or 0, p1 and p1[3] or 0)
+											return
+										end
+										local p = CM.nodePosXYZ(n)
+										if p then d = string.format("%d=node (%.1f,%.1f,%.2f)", n, p[1], p[2], p[3]); return end
+										local co = api.engine.getComponent(n, api.type.ComponentType.CONSTRUCTION)
+										if co then d = string.format("%d=construction %s (%.1f,%.1f)", n, tostring(co.fileName), co.transf[13], co.transf[14]) end
+									end)
+									return d
+								end
+								for _, k in ipairs({ "collisionEntities", "autoRemovalEntity2models", "fieldEntities", "buildingEntities" }) do
+									local v = nil; pcall(function() v = ci[k] end)
+									local items = list(v)
+									local parts = {}
+									for _, x in ipairs(items) do
+										local id = x
+										if type(x) == "table" or type(x) == "userdata" then pcall(function() id = x.entity or x[1] or x end) end
+										parts[#parts + 1] = describe(id)
+									end
+									CM.cmLog(string.format("XING: collisionInfo.%s (%d): %s", k, #items, table.concat(parts, " ; ")))
+								end
 							end)
 							pcall(function()
 								for i, n in ipairs(addNodes) do

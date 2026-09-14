@@ -92,9 +92,20 @@ CM.bootOk, K.BASE = pcall(function()
 	CM.baseCandidates = {}
 	for _, c in ipairs(cands) do CM.baseCandidates[#CM.baseCandidates + 1] = c.path end
 	for _, c in ipairs(cands) do
-		local f = io.open(c.path .. "tpf2_instance.txt", "r")
-		if f then
-			f:close()
+		-- Each probe in its own pcall. A player with 503 mods crashed the game here
+		-- with the error value "file (0000000000000000)": io.open or close THREW, and
+		-- threw a file handle rather than a message -- the game's script state is shared
+		-- with every mod's game scripts, so io may not be the standard library
+		-- (2026-09-12). A probe that throws just means "not proven here".
+		local okOpen, f = pcall(io.open, c.path .. "tpf2_instance.txt", "r")
+		local isFile = false
+		if okOpen and f then
+			pcall(function() isFile = (io.type == nil) or io.type(f) == "file" end)
+			pcall(function() f:close() end)
+		elseif not okOpen then
+			CM.bootIoError = f
+		end
+		if isFile then
 			CM.baseSource = c.source .. " (identity file found)"
 			return c.path
 		end
@@ -103,13 +114,27 @@ CM.bootOk, K.BASE = pcall(function()
 	local pick
 	for _, c in ipairs(cands) do if c.source == "LOCALAPPDATA" then pick = c end end
 	if not pick then error("LOCALAPPDATA is not readable, and TPF2MP_DATADIR (if set) holds no tpf2_instance.txt", 0) end
+	-- The game's io.open wants UTF-8 and os.getenv hands back ANSI bytes, so a
+	-- profile folder with non-ASCII characters cannot be opened from here. The proxy
+	-- DLL publishes an ASCII TPF2MP_DATADIR for exactly that case (datadir.h); if we
+	-- got this far without it, the DLLs are not running, and nothing would work.
+	if pick.path:find("[\128-\255]") then
+		error("the Windows user folder has non-ASCII characters and the multiplayer DLLs did not publish TPF2MP_DATADIR (reinstall with the installer, and start the game through Steam)", 0)
+	end
 	CM.baseSource = pick.source .. " (no identity file yet)"
 	return pick.path
 end)
 if not CM.bootOk then
-	local msg = "Transport Fever 2 Multiplayer: finding the data folder failed: " .. (tostring(K.BASE):gsub("[\128-\255]", "?"))
-	print("[ls-boot] " .. msg)
-	error(msg, 0)
+	-- NEVER stop the game's load. error() here aborted creating a new game outright
+	-- ("Exception during init", 2026-09-12) for a player with a plain single-player
+	-- setup. The mod switches itself off for this game instead: an empty game
+	-- script, and a line in stdout saying why.
+	local function txt(v) return type(v) .. " " .. (tostring(v):gsub("[\128-\255]", "?")) end
+	print("[ls-boot] Transport Fever 2 Multiplayer: finding the data folder failed: " .. txt(K.BASE)
+		.. " | io=" .. type(io) .. " io.open=" .. type(io and io.open) .. " last io error=" .. txt(CM.bootIoError)
+		.. " -- multiplayer is OFF for this game; everything else loads normally")
+	function data() return {} end
+	return
 end
 print("[ls-boot] data folder " .. (K.BASE:gsub("[\128-\255]", "?")) .. " (" .. tostring(CM.baseSource) .. ")")
 K.IDENTITY_FILE = K.BASE .. "tpf2_instance.txt"
@@ -335,11 +360,16 @@ end
 -- slice treats peer=0 as solo, and a session's first second is at t=0.
 function CM.statusLine(now)
 	local pt = CM.statusPeerT()
-	return string.format("t=%d  peer=%s  skew=%s  desyncs=%d  late=%d  applylag=%.1f/%d of %d  queued=%d",
+	-- mp= is the lobby's player count (tpf2_bridge_ctl.txt): a multiplayer session is
+	-- known from the first ticks, seconds before the peer's first heartbeat. The slice
+	-- reads it so a build in that window is cancelled and replayed like any other,
+	-- instead of running natively on one instance only (2026-09-11: two tracks laid
+	-- 2 s after loading existed on A and nowhere else).
+	return string.format("t=%d  peer=%s  skew=%s  desyncs=%d  late=%d  applylag=%.1f/%d of %d  queued=%d  mp=%d",
 		math.floor(now), tostring(pt and math.max(1, math.floor(pt)) or "?"),
 		pt and string.format("%+.1f", now - pt) or "?",
 		CM.desyncs, CM.lateCount, CM.applyLagMax or 0, CM.applyLate or 0, CM.applyCount or 0,
-		#CM.queue)
+		#CM.queue, tonumber(CM.rosterPlayers) or 0)
 end
 -- Letter -> 0..7, for anything that needs a per-origin namespace.
 function CM.originIdx(o)
@@ -411,24 +441,32 @@ end
 function CM.bootText(v)
 	return (tostring(v):gsub("[\128-\255]", "?"))
 end
+-- A module that cannot load switches the mod OFF for this game; it never stops the
+-- game's own load (error() here aborted it with "Exception during init"). Later
+-- modules are skipped and the chunk-level code between them indexes a stub that
+-- answers every field with a no-op, so the check before data() can return an
+-- empty game script.
+function CM.bootStub()
+	return setmetatable({}, { __index = function() return function() end end })
+end
+function CM.bootFail(msg)
+	print("[ls-boot] " .. msg)
+	CM.bootFailed = CM.bootFailed or msg
+	return CM.bootStub()
+end
 function CM.boot(name)
+	if CM.bootFailed then return CM.bootStub() end
 	print("[ls-boot] loading " .. name)
 	local ok, factory = pcall(require, name)
 	if not ok then
-		local msg = "Transport Fever 2 Multiplayer: require('" .. name .. "') failed: " .. CM.bootText(factory)
-		print("[ls-boot] " .. msg)
-		error(msg, 0)
+		return CM.bootFail("Transport Fever 2 Multiplayer: require('" .. name .. "') failed: " .. CM.bootText(factory))
 	end
 	if type(factory) ~= "function" then
-		local msg = "Transport Fever 2 Multiplayer: require('" .. name .. "') returned a " .. type(factory) .. ", not the module factory (another mod may have replaced require)"
-		print("[ls-boot] " .. msg)
-		error(msg, 0)
+		return CM.bootFail("Transport Fever 2 Multiplayer: require('" .. name .. "') returned a " .. type(factory) .. ", not the module factory (another mod may have replaced require)")
 	end
 	local ok2, result = pcall(factory, CM, K, log)
 	if not ok2 then
-		local msg = "Transport Fever 2 Multiplayer: module " .. name .. " failed while loading: " .. CM.bootText(result)
-		print("[ls-boot] " .. msg)
-		error(msg, 0)
+		return CM.bootFail("Transport Fever 2 Multiplayer: module " .. name .. " failed while loading: " .. CM.bootText(result))
 	end
 	return result
 end
@@ -462,7 +500,7 @@ K.JOURNAL_LOAN = 0
 -- a 30,000,000 loan is several ticks of settling.
 K.LOAN_SETTLE_TICKS = 90
 K.JOURNAL_TRANSFER = 6
-K.STRICT_OPS = { VREV = true, VLINE = true, VSELL = true, VDEPOT = true, VREPL = true, VBUY = true, LUPDATE = true, LDELETE = true }   -- replay on the originator too, but only when ARMED=1 (the slice cancelled it)
+K.STRICT_OPS = { VREV = true, VLINE = true, VSELL = true, VDEPOT = true, VREPL = true, VBUY = true, LCREATE = true, LUPDATE = true, LDELETE = true }   -- replay on the originator too, but only when ARMED=1 (the slice cancelled it)
 -- CONX/CONP have no slice cancel (the construction's module params cannot be
 -- read from the proposal); the originator instead deletes its native copy and
 -- replays, gated by c.cancelled rather than ARMED. See execConX.
@@ -568,6 +606,7 @@ local function execute(c)
 	elseif c.op == "ROAD" or c.op == "RAIL" then CM.execEdge(c)
 	elseif c.op == "CON" then CM.execCon(c)
 	elseif c.op == "DEMOLISH" then CM.execDemolish(c)
+	elseif c.op == "HEALCHK" then CM.execHealCheck(c)
 	elseif c.op == "EDEMO" then CM.execEdgeDemolish(c)
 	elseif c.op == "CONFAIL" then CM.execConFail(c)
 	elseif c.op == "VBUY" then CM.execVBuy(c)
@@ -655,7 +694,37 @@ function CM.vposShip(stamp)
 	for o in pairs(CM.vposPeer) do CM.vposCompare(stamp, o) end
 end
 
+-- NO HASH ON MAPS BIGGER THAN VANILLA. The hash walks the whole world on the sim
+-- thread, and on a 224-tile map (27k edges) that measured 3.0-3.5 s per stamp: a
+-- freeze every few minutes, in solo games too. Above what the stock New Game menu
+-- builds -- Megalomaniac, at most 96 x 96 = 9,216 tiles and 192 on an axis (1:4)
+-- -- the check is off for the whole game, and desync detection with it. Decided
+-- from the terrain size, which every instance reads from the same save, so no
+-- instance hashes while another waits for stamps that never come.
+K.VANILLA_MAX_TILES      = 96 * 96
+K.VANILLA_MAX_TILES_AXIS = 192
+function CM.mapTooBigToHash()
+	if CM.hashOffBigMap ~= nil then return CM.hashOffBigMap end
+	local ok, tx, ty = pcall(function()
+		local terrain = api.engine.getComponent(api.engine.util.getWorld(), api.type.ComponentType.TERRAIN)
+		return terrain.size.x, terrain.size.y
+	end)
+	if not ok or type(tx) ~= "number" or type(ty) ~= "number" then
+		CM.hashOffBigMap = false
+		log("hash check: map size unreadable (" .. tostring(tx) .. ") -- hashing as usual")
+		return false
+	end
+	CM.hashOffBigMap = tx * ty > K.VANILLA_MAX_TILES or math.max(tx, ty) > K.VANILLA_MAX_TILES_AXIS
+	log(string.format("hash check: map %d x %d tiles -- %s", tx, ty, CM.hashOffBigMap
+		and "larger than vanilla allows, the desync hash is OFF for this game" or "hashing as usual"))
+	return CM.hashOffBigMap
+end
+
 local function checkHash(now)
+	if CM.mapTooBigToHash() then
+		CM.dashVerdict = "OFF"
+		return
+	end
 	-- CM.hashEvery is set from the map size on the first hash and is the same
 	-- on every instance (same save); until then the base interval applies.
 	local every = CM.hashEvery or K.HASH_EVERY_GAMETIME
@@ -691,6 +760,11 @@ local function checkHash(now)
 	CM.compareAt(stamp)
 end
 
+if CM.bootFailed then
+	print("[ls-boot] Transport Fever 2 Multiplayer is OFF for this game (" .. CM.bootText(CM.bootFailed) .. ") -- everything else loads normally")
+	function data() return {} end
+	return
+end
 print("[ls-boot] all modules loaded")
 
 function data()
@@ -743,9 +817,43 @@ function data()
 			-- pure dead time before a build was even scheduled; a file stat per
 			-- tick is far cheaper than that.
 			CM.pollInject()
-			if CM.ticks % K.CON_POLL_EVERY == 0 then CM.pollNewConstructions() end
-			if CM.ticks % K.CON_POLL_EVERY == 3 then CM.pollStops() end
+			-- NO WORLD SCANS ON A TIMER. The construction and stop polls walked every
+			-- construction and every edge object on the map every 10 steps -- ~300 ms of frozen
+			-- simulation each on a big map (2026-09-12) -- to find builds the slice already
+			-- announces. They run once at load (what the save holds is known, not new) and as a
+			-- one-shot CATCH-UP: after a NATIVE line or a not-armed stop (the slice left a build
+			-- native), or after update() stalled long enough in a multiplayer session for the
+			-- status file to go stale (over 15 s, and the slice then builds natively). Replays
+			-- land by a lookup at their own position (CM.landReplays).
+			if not CM.consPrimed then CM.pollNewConstructions() end
+			if not CM.stopPrimed then CM.pollStops() end
+			CM.landReplays()
+			do
+				local wall = os.time()
+				local mp = CM.peerSeen or (tonumber(CM.rosterPlayers) or 0) >= 2
+				if mp and CM.lastUpdWall and wall - CM.lastUpdWall >= 10 then
+					CM.catchUpAt = math.min(CM.catchUpAt or math.huge, CM.ticks)
+					log(string.format("update() stalled %d s in a multiplayer session -- catch-up scan due", wall - CM.lastUpdWall))
+				end
+				CM.lastUpdWall = wall
+			end
+			if CM.catchUpAt and CM.ticks >= CM.catchUpAt then
+				CM.catchUpAt = nil
+				log("catch-up scan: constructions and stops")
+				CM.pollNewConstructions()
+				CM.pollStops()
+			end
 			if CM.ticks % 15 == 7 then CM.pollLoan() end
+			-- Until the peer's first heartbeat, refresh the status file every 3 ticks rather
+			-- than every 15: the slice decides from it whether a build can be cancelled, and
+			-- the first seconds after a load are exactly when a player starts building.
+			if not CM.peerSeen and CM.ticks % 3 == 1 then
+				pcall(CM.speedRequest)   -- reads the lobby's players= (throttled inside)
+				pcall(function()
+					local f = io.open(K.BASE .. "lockstep_status_" .. K.INSTANCE .. ".txt", "w")
+					if f then f:write(CM.statusLine(CM.gameTime() or 0)); f:close() end
+				end)
+			end
 			if CM.ticks % 10 == 5 then CM.nackScan() end
 			CM.flushConPairs()
 			CM.primeConstructions()
@@ -764,9 +872,9 @@ function data()
 				end
 			end
 			if CM.ticks % K.REMOVAL_POLL_EVERY == 0 then CM.pollConstructionRemovals() end
-			-- Cheap: the watch list is empty unless a replay has cut a road, and
-			-- each entry is looked at once, CM.SPLIT_SETTLE ticks after the cut.
-			if CM.ticks % 60 == 0 and not CM.conxBusy then CM.sweepSplits() end
+			-- Orphaned-split heals are NOT swept here any more: a frame-tick sweep healed
+			-- on a different sim step on every instance (desync, 2026-09-12). Each watched
+			-- split is a HEALCHK in the step-locked queue instead (cons.lua CM.watchSplit).
 			if CM.ticks % K.CON_EDIT_SCAN_EVERY == 0 then CM.scanConstructionEdits() end
 
 			-- the command delay follows the measured round trips (net.lua CM.execDelayTick)
@@ -943,7 +1051,7 @@ function data()
 						local sp = "?"
 						pcall(function() sp = tostring(game.interface.getGameSpeed()) end)
 						f:write(string.format("eff=%s\nspeedreq=%s\nsync=%s\npace=%s\nxfer=%s\n", CM.effSpeed and string.format("%g", CM.effSpeed) or "-",
-							CM.spdReqInForce and CM.spdReq and string.format("%g", CM.spdReq) or "-", CM.syncState or "-", CM.paceInfo or "-", CM.xferInfo or "-"))
+							CM.spdReqInForce and (CM.guiReq or CM.spdReq) and string.format("%g", CM.guiReq or CM.spdReq) or "-", CM.syncState or "-", CM.paceInfo or "-", CM.xferInfo or "-"))
 						-- companies: mine, the roster, and who plays what ("3:a,b 4:c")
 						pcall(function()
 							local ids, who = {}, {}
@@ -1269,9 +1377,47 @@ function data()
 					-- the Resync section (resync.lua): first, so it stands out while every
 					-- other block is hidden; it is empty and hidden until a desync
 					box:addItem(CM.resyncSection())
+					-- the host's speed buttons: shown by default, this toggle (host only) hides them
+					CM.dashShowHostSpeed = (CM.dashShowHostSpeed ~= false)
+					D.speedTog = toggleBtn("  speed  ", function()
+						CM.dashShowHostSpeed = not CM.dashShowHostSpeed
+						D.hostSpeedShown = nil   -- the GUI tick re-applies the row's visibility
+					end)
+					tog:addItem(D.speedTog)
+					pcall(function() D.speedTog:setVisible(false, false) end)
 					local togC = api.gui.comp.Component.new("mpToggles")
 					togC:setLayout(tog)
 					box:addItem(togC)
+					-- ---- host speed buttons (2026-09-12) ----
+					-- Shown on the host's window only. A press appends SPEEDSET <v> to our
+					-- inject file; the host's pacer makes it the session speed
+					-- (CM.guiSpeedSet) and every joiner follows it through LSEFF.
+					local function hostSpeed(v)
+						v = math.max(0.25, math.min(4.5, math.floor(v * 4 + 0.5) / 4))
+						D.speedAsked, D.speedAskedAt = v, os.time()
+						local f = io.open(K.BASE .. "lockstep_inject_" .. (K.INSTANCE or "a") .. ".txt", "a")
+						if f then f:write(string.format("SPEEDSET %g", v) .. string.char(10)); f:close() end
+						pcall(function() D.hostSpeedText:setText(string.format("session speed: %gx   ", v)) end)
+					end
+					-- -/+0.25 step from the last press for a few seconds: the session speed
+					-- read back from the dash file lags a press by a second or two
+					local function hostSpeedBase()
+						if D.speedAsked and os.time() - (D.speedAskedAt or 0) <= 5 then return D.speedAsked end
+						return (D.speedEff and D.speedEff > 0) and D.speedEff or D.speedAsked or 1
+					end
+					local hsRow = api.gui.layout.BoxLayout.new("HORIZONTAL")
+					D.hostSpeedText = api.gui.comp.TextView.new("session speed: -   ")
+					hsRow:addItem(D.hostSpeedText)
+					hsRow:addItem(toggleBtn("  -0.25  ", function() hostSpeed(hostSpeedBase() - 0.25) end))
+					for _, sv in ipairs({ 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5 }) do
+						hsRow:addItem(toggleBtn(string.format("  %g  ", sv), function() hostSpeed(sv) end))
+					end
+					hsRow:addItem(toggleBtn("  +0.25  ", function() hostSpeed(hostSpeedBase() + 0.25) end))
+					D.hostSpeedBox = api.gui.comp.Component.new("mpHostSpeed")
+					D.hostSpeedBox:setLayout(hsRow)
+					box:addItem(D.hostSpeedBox)
+					D.hostSpeedShown = false
+					pcall(function() D.hostSpeedBox:setVisible(false, false) end)
 					-- ---- stats, in words (2026-09-11) ----
 					-- A status line (do the worlds match; if not, what differs, since when
 					-- and what to do) and one row per player (stats.lua). The raw counters
@@ -1383,6 +1529,12 @@ function data()
 					local chatL = api.gui.layout.BoxLayout.new("VERTICAL")
 					D.chatText = api.gui.comp.TextView.new("chat: (no messages yet)")
 					chatL:addItem(D.chatText)
+					-- The input is CLOSED until the player asks for it (2026-09-12). An
+					-- always-present field kept keyboard focus after a message or a stray
+					-- click, so camera keys went into the chat ("dww", "aaaaaaaaa") and the
+					-- next Enter sent them. Now "type a message" opens it, and Enter (one
+					-- message), Esc, losing focus while empty, or 30 s untouched closes it
+					-- again. A hidden, disabled field cannot take keys.
 					local okI, errI = pcall(function()
 						local mk = api.gui.comp.TextInputField
 						local ok1, inp = pcall(function() return mk.new() end)
@@ -1390,20 +1542,50 @@ function data()
 						D.input = inp
 						pcall(function() D.input:setMinimumSize(api.gui.util.Size.new(280, 26)) end)
 						pcall(function() D.input:setMaximumSize(api.gui.util.Size.new(400, 26)) end)
+						pcall(function() D.input:setMaxLength(190) end)
+						local say = api.gui.layout.BoxLayout.new("HORIZONTAL")
+						say:addItem(api.gui.comp.TextView.new("say: "))
+						say:addItem(D.input)
+						D.sayRow = api.gui.comp.Component.new("mpSay")
+						D.sayRow:setLayout(say)
+						D.sayOpenBtn = toggleBtn("  type a message  ", function() CM.chatOpenInput() end)
+						function CM.chatCloseInput()
+							D.chatOpen = false
+							pcall(function() D.input:setText("", false) end)
+							pcall(function() D.input:setEnabled(false) end)
+							pcall(function() D.sayRow:setVisible(false, false) end)
+							pcall(function() D.sayOpenBtn:setVisible(true, false) end)
+						end
+						function CM.chatOpenInput()
+							D.chatOpen = true
+							D.chatIdleText, D.chatIdleSince = "", os.time()
+							pcall(function() D.input:setText("", false) end)
+							pcall(function() D.input:setEnabled(true) end)
+							pcall(function() D.sayOpenBtn:setVisible(false, false) end)
+							pcall(function() D.sayRow:setVisible(true, false) end)
+							pcall(function() D.input:setFocus() end)
+						end
 						D.input:onEnter(function()
 							local t = D.input:getText()
 							if t and #t > 0 then
 								-- "/desynclogs ..." sets the desync popup's choice here and never reaches the chat
 								if not (CM.desyncLogsCommand and CM.desyncLogsCommand(t)) then CM.chatSend(t) end
-								pcall(function() D.input:setText("", false) end)
 							end
+							CM.chatCloseInput()
 						end)
-						local say = api.gui.layout.BoxLayout.new("HORIZONTAL")
-						say:addItem(api.gui.comp.TextView.new("say: "))
-						say:addItem(D.input)
-						local sayC = api.gui.comp.Component.new("mpSay")
-						sayC:setLayout(say)
-						chatL:addItem(sayC)
+						pcall(function() D.input:onCancel(function() CM.chatCloseInput() end) end)
+						pcall(function()
+							D.input:onFocusChange(function(focused)
+								if focused == false and D.chatOpen then
+									local t = ""
+									pcall(function() t = D.input:getText() or "" end)
+									if t == "" then CM.chatCloseInput() end
+								end
+							end)
+						end)
+						chatL:addItem(D.sayOpenBtn)
+						chatL:addItem(D.sayRow)
+						CM.chatCloseInput()
 					end)
 					if not okI then print("[ls-gui] chat input field unavailable: " .. tostring(errI)) end
 					D.chatBox = api.gui.comp.Component.new("mpChat")
@@ -1474,6 +1656,32 @@ function data()
 					if D.chatText and (guiTick % 30) == 0 then
 						local lines = CM.chatTail(8)
 						if #lines > 0 then D.chatText:setText(table.concat(lines, string.char(10))) end
+					end
+					-- an open chat input nobody has typed into for 30 s closes itself
+					if D.chatOpen and CM.chatCloseInput and (guiTick % 30) == 0 then
+						local t = ""
+						pcall(function() t = D.input:getText() or "" end)
+						if t ~= D.chatIdleText then D.chatIdleText, D.chatIdleSince = t, os.time()
+						elseif os.time() - (D.chatIdleSince or 0) > 30 then CM.chatCloseInput() end
+					end
+					-- the host speed row: on the host's window only, with the session speed
+					if D.hostSpeedBox and (guiTick % 10) == 0 or (D.hostSpeedBox and D.hostSpeedShown == nil) then
+						local isHost = (CM.guiLeader and CM.guiLeader() or "a") == own
+						local showRow = isHost and CM.dashShowHostSpeed ~= false
+						if D.hostSpeedShown ~= showRow then
+							D.hostSpeedShown = showRow
+							D.hostSpeedBox:setVisible(showRow, false)
+						end
+						if D.speedTog and D.speedTogShown ~= isHost then
+							D.speedTogShown = isHost
+							pcall(function() D.speedTog:setVisible(isHost, false) end)
+						end
+						if isHost and mine then
+							D.speedEff = tonumber(mine.eff)
+							if not (D.speedAsked and os.time() - (D.speedAskedAt or 0) <= 5) then
+								D.hostSpeedText:setText("session speed: " .. (D.speedEff and string.format("%gx", D.speedEff) or "-") .. "   ")
+							end
+						end
 					end
 				end)
 				-- Ctrl+Shift+D (caught by the menu DLL's keyboard hook) flips a

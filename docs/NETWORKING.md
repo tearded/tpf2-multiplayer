@@ -19,11 +19,11 @@ own lobby process over loopback; the lobbies carry the frames between machines.
 
 | what | where | notes |
 |---|---|---|
-| lobby | UDP 29471 on the host | The one port a host must be reachable on. Joiners bind an ephemeral port and only dial out. |
+| lobby | UDP 29471 on the host | The host's lobby port. It need not be open: the host punches toward each joiner that knocks through the master server (see [Connecting](#connecting)). Joiners bind an ephemeral port. |
 | game relay | UDP `127.0.0.1:7773` (host) / first free of 7774-7805 (joiners) | The bridge sends its frames here; the lobby delivers inbound frames to the bridge's own port. Loopback only. |
 | bridge | UDP `127.0.0.1:7771` (or 7772, or a fallback) | The `port=` line of `tpf2_instance.txt` in the data folder. Bound to loopback, and it drops datagrams that are not from its peer ([SECURITY.md](SECURITY.md#what-is-protected)). |
 | STUN | outbound UDP 19302 / 3478 | `stun.l.google.com`, `stun.nextcloud.com`, `stun.cloudflare.com`, `stun.services.mozilla.com`. |
-| master server | outbound HTTPS | The public game list; see [Master server](#master-server). |
+| master server | outbound HTTPS | The public game list, and the rendezvous for hole punching (`/knock`); see [Master server](#master-server). |
 | dedicated relay | UDP 29471 on the server | Same protocol as a host. |
 
 ## Join codes
@@ -55,15 +55,26 @@ about 74 characters.
 ## Connecting
 
 **Host.** `netpunch.exe host` observes its own socket (STUN, plus a UPnP port mapping
-it removes on exit), prints `CODE=...`, and then only answers. It never dials anyone, so
-it has to be reachable inbound: through UPnP, an open NAT, a manual port forward of UDP
-29471, a public address, or by using a dedicated relay instead.
+it removes on exit), prints `CODE=...`, answers every HELLO, and polls the master server
+for knocks every second. For each knock it can open, it sends HELLO to that joiner's
+public and LAN addresses every 0.2 s for 15 s. Those packets open the host's own NAT for
+the joiner's HELLOs, so the host does not need UPnP or a forwarded port. A host still
+has to be reachable directly when the master is unreachable, or when both ends sit
+behind symmetric NAT or CGNAT. A dedicated relay does not poll: its port is open.
 
 **Joiner.** `netpunch.exe join <code>` decodes the code, observes its own socket (no
 UPnP), and sends HELLO every 100 ms to the host's candidates, LAN first, until an ACK
-echoes its token or 40 s pass. If the joiner's public address equals the host's, only
-the LAN candidate is used (no NAT hairpin). There is no TURN server and no port
-prediction.
+echoes its token or 40 s pass. Punching is the fallback: a host whose port is open (UPnP,
+a forward) answers within a second and nothing else happens. If there is no answer after
+4 s, the joiner **knocks**: every 2 s it posts its own
+profile code to the master server's `/knock`, sealed with a key derived from the code's
+secret (and password), under a tag also derived from the secret
+(`SHA-256("tpf2mp-rendezvous-v1|" + secret)`, 24 hex characters). The master can
+neither read a knock nor tell which lobby a tag belongs to, and keeps knocks for 60 s.
+If the joiner's public address equals the host's, only the LAN candidate is used (no
+NAT hairpin). There is no TURN server and no port prediction. `--rendezvous <url>`
+picks the master used for knocks (default: `--publish`, else the project's);
+`--rendezvous off` disables them.
 
 **Joiner to joiner (mesh).** Every joiner puts its own profile code in its `join`, the
 host shares all profiles in the roster, and joiners dial each other on their single
@@ -177,9 +188,9 @@ Commands (`lobby_in.jsonl`): `chat` (`text`); `company` (`player`, `id`);
 `publish` (`on`); `start` (optional `save` = path of the save to share); `quit`; `name`
 (accepted, never sent).
 
-Chat lines starting with `/` are conventions of the game side, not the lobby, except
-`/new` and `/resume`, which a relay interprets (below). The panel treats a chat line
-starting with `!hotjoin ` as a status message.
+Chat lines starting with `/` are conventions of the game side, not the lobby, except `/new`,
+which a relay interprets (below). The panel treats a chat line starting with `!hotjoin ` as a
+status message.
 
 ## Save transfer
 
@@ -243,10 +254,11 @@ accept inbound connections, and for an always-on public server.
 - **Stored world.** The relay keeps the last save a leader uploaded
   (`incoming_save.*` in its data folder), replaced only when a new upload verifies.
 - **Resuming.** When a leader joins a relay that holds a world and no session is running,
-  everyone is told the world will continue in 10 s. The leader can say `/new` in chat within
-  that time to discard it and share their own save with START GAME instead. After the grace
-  the relay pushes the stored world to everyone and starts them. `/resume` (leader) pushes
-  it on demand.
+  the relay pushes the stored world to everyone and starts them, after 3 s so that players
+  arriving together share one transfer. With no stored world, the leader is told to press
+  START GAME, which uploads the leader's most recent save (below). Until the stored world is
+  sent, the leader can say `/new` in chat to discard it and share their own save with START
+  GAME instead. To replace the stored world from outside the game, see `tools/relay_put_save.sh`.
 - **Uploads.** The leader's START GAME uploads its save to the relay, which then shares it
   with everyone waiting. While a leader plays, its menu DLL re-uploads a fresh autosave every
   2 minutes (`relay_autosave_min` in `tpf2_menu_flags.txt`; 0 turns it off); when nobody is

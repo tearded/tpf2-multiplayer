@@ -26,13 +26,15 @@ local ORDER = { "e", "z", "c", "v", "p", "t", "m", "l", "n" }
 local SIDE = { m = true, l = true, n = true }
 
 -- A dash verdict in words. The script state writes "SYNC", "-" (no comparison
--- yet), "DESYNC e+z vs a" (the hash lanes that differ), "DESYNC town +5 vs a"
--- (town buildings, ours minus theirs) or "DESYNC vpos 12m vs b" (vehicle drift),
--- and a peer's own column just "DESYNC". Returns state ("sync", "desync" or
--- "checking"), the other player's letter (or nil) and what differs (or nil).
+-- yet), "OFF" (no hash: the map is larger than vanilla allows), "DESYNC e+z vs a"
+-- (the hash lanes that differ), "DESYNC town +5 vs a" (town buildings, ours minus
+-- theirs) or "DESYNC vpos 12m vs b" (vehicle drift), and a peer's own column just
+-- "DESYNC". Returns state ("sync", "desync", "off" or "checking"), the other
+-- player's letter (or nil) and what differs (or nil).
 function CM.verdictWords(v)
 	v = tostring(v or "-")
 	if v == "SYNC" then return "sync" end
+	if v == "OFF" then return "off" end
 	if v:sub(1, 6) ~= "DESYNC" then return "checking" end
 	local d, who = v:match("^DESYNC town ([%+%-]%d+) vs (%a+)")
 	if d then
@@ -67,9 +69,9 @@ function CM.clockWords(sk)
 end
 
 -- Our own clock: the pacing line ("0.95x e=-2.40", e in sim steps from the
--- leader), or the leader, which is the clock.
+-- leader). The leader IS the clock, so on the host's own screen it is in step.
 function CM.paceWords(pace, isLeader)
-	if isLeader then return "sets the clock" end
+	if isLeader then return "in step" end
 	local mult, e = tostring(pace or ""):match("^([%d%.]+)x e=([%+%-][%d%.]+)")
 	e = tonumber(e)
 	if mult and e then
@@ -77,6 +79,17 @@ function CM.paceWords(pace, isLeader)
 		if e > 0.3 then return string.format("easing off (%.1f steps ahead)", e) end
 	end
 	return "in step"
+end
+
+-- The host's row on a joiner's screen: how far the host is from YOU, in sim
+-- steps, from our pacing error (e < 0: we are behind, so the host is ahead).
+-- The heartbeat skew only has whole game-time units, so it read "in step" for
+-- almost any gap; it stays the fallback while pacing has no reading yet.
+function CM.hostDiffWords(pace, skew)
+	local e = tonumber(tostring(pace or ""):match("e=([%+%-][%d%.]+)"))
+	if not e then return CM.clockWords(skew) end
+	if math.abs(e) <= 0.3 then return "in step" end
+	return string.format("%.1f steps %s", math.abs(e), e < 0 and "ahead of you" or "behind you")
 end
 
 -- the session's leader letter from the bridge ctl (a relay lobby names it)
@@ -126,6 +139,9 @@ function CM.statusWords(kv, npeers)
 	if npeers == 0 then
 		return "No other player heard right now -- nothing to compare."
 	end
+	if state == "off" then
+		return "Desync check OFF: this map is larger than vanilla allows, and hashing a world this size freezes the game for seconds at a time."
+	end
 	if state == "desync" or desyncs > 0 then
 		local lines = {}
 		if state == "desync" then
@@ -166,7 +182,8 @@ function CM.statsInWords(status, cells, own, present, fresh, peerInfo)
 			if letter == own then
 				local s = "checking"
 				if ownState == "desync" then s = "differ"
-				elseif ownState == "sync" then s = desyncs > 0 and "matched last check" or "match" end
+				elseif ownState == "sync" then s = desyncs > 0 and "matched last check" or "match"
+				elseif ownState == "off" then s = "not checked" end
 				c.sync:setText(s .. "   ")
 				c.clock:setText(CM.paceWords(kv.pace, letter == leader) .. "   ")
 				c.notes:setText(CM.ownNotes(kv))
@@ -175,10 +192,15 @@ function CM.statsInWords(status, cells, own, present, fresh, peerInfo)
 				local s = "not heard"
 				if info then
 					local st = CM.verdictWords(info.verdict)
-					s = (st == "sync" and "match") or (st == "desync" and "differ") or "checking"
+					s = (st == "sync" and "match") or (st == "desync" and "differ")
+						or (ownState == "off" and "not checked") or "checking"
 				end
 				c.sync:setText(s .. "   ")
-				c.clock:setText((info and CM.clockWords(info.skew) or "-") .. "   ")
+				local clock = "-"
+				if info then
+					clock = (letter == leader) and CM.hostDiffWords(kv.pace, info.skew) or CM.clockWords(info.skew)
+				end
+				c.clock:setText(clock .. "   ")
 				c.notes:setText("")
 			end
 		end

@@ -28,6 +28,24 @@ The title menu gains a **Multiplayer** entry. It opens a panel over the menu:
 
 While the panel is open, typing goes into its fields and the game does not see it.
 
+## Finding each other on the map
+
+Press **Ctrl+Shift+P** with the mouse over the map to mark that spot for ten
+seconds. The marker stays put when you move the mouse. Each player has their own
+colour; a new ping replaces that player's previous one. Pings are limited to one
+per second.
+
+The in-game Multiplayer window shows who marked a spot. **Go to ping A/B/...**
+centres your camera on that mark while keeping your zoom and orientation.
+**Go to A/B/...** copies that player's latest camera view once. Neither function
+moves your camera automatically when somebody else pings or moves.
+
+**Here! Ping view centre** marks the centre of your own view without using a
+shortcut. **Ctrl+Shift+D** shows the Multiplayer window if it is hidden. Buttons
+are disabled when the peer's position is unavailable, the ping expires, or resync
+is in progress. These features require the navigation build on both players;
+they do not change the world or the savegame.
+
 ## Hosting
 
 1. Title screen → **Multiplayer** → **HOST GAME**.

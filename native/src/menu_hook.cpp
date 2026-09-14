@@ -2862,6 +2862,31 @@ static void WriteDashFlag()
 
 static LRESULT CALLBACK LlKeyboard(int code, WPARAM wp, LPARAM lp)
 {
+    // One request per physical press, only in this foreground game. The GUI
+    // samples terrain itself; the hook never calls into the game from this thread.
+    static bool pingDown = false;
+    if (code == HC_ACTION) {
+        const auto* key = (const KBDLLHOOKSTRUCT*)lp;
+        if (key->vkCode == 'P') {
+            if (wp == WM_KEYUP || wp == WM_SYSKEYUP) {
+                const bool consumed = pingDown; pingDown = false;
+                if (consumed) return 1;
+            } else if ((wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN) && gameHasFocus() &&
+                (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000)) {
+                if (!pingDown) {
+                    wchar_t path[MAX_PATH];
+                    _snwprintf_s(path, _TRUNCATE, L"%stpf2mp_ping_key.txt", g_dataDirW);
+                    FILE* f = _wfsopen(path, L"w", _SH_DENYNO);
+                    if (f) {
+                        fprintf(f, "%lu %llu\nend\n", GetCurrentProcessId(), (unsigned long long)GetTickCount64());
+                        fclose(f);
+                    }
+                }
+                pingDown = true;
+                return 1;
+            }
+        }
+    }
     if (code == HC_ACTION && (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN) && gameHasFocus()) {
         KBDLLHOOKSTRUCT* k0 = (KBDLLHOOKSTRUCT*)lp;
         if (k0->vkCode == 'D' && (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000)) {

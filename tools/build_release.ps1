@@ -19,6 +19,8 @@ python tools/luacheck.py
 if ($LASTEXITCODE -ne 0) { throw 'Lua syntax checks failed' }
 python tools/resync_test.py
 if ($LASTEXITCODE -ne 0) { throw 'Automatic resync regression failed' }
+python tools/navigation_test.py
+if ($LASTEXITCODE -ne 0) { throw 'Map navigation regression failed' }
 foreach ($players in @(3, 5, 8)) {
     python tools/test_auto_sync_lobby.py --players $players
     if ($LASTEXITCODE -ne 0) { throw "Recovery regression failed for $players players" }

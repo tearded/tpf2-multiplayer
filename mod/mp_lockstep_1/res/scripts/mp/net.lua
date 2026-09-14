@@ -764,6 +764,8 @@ local function onLine(line)
 	elseif op == "LSCUR" then
 		-- another player's cursor (cursors.lua): cosmetic, straight to the GUI's file
 		pcall(CM.cursorRecv, line)
+	elseif op == "LSNAV" then
+		pcall(CM.navigationRecv, line)
 	elseif op == "LSPREVIEW" then
 		pcall(CM.previewRecv, line)
 	elseif op == "LSEFF" then

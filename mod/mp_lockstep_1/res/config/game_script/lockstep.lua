@@ -653,6 +653,7 @@ CM.boot("mp.pacing")
 -- ---------- other players' cursors as coloured ground circles (cosmetic) ----------
 -- Lives in res/scripts/mp/cursors.lua.
 CM.boot("mp.cursors")
+CM.boot("mp.navigation")
 CM.boot("mp.previews")
 -- ---------- the Multiplayer window's stats section, in words (GUI state) ----------
 -- Lives in res/scripts/mp/stats.lua.
@@ -894,6 +895,7 @@ function data()
 			CM.paceTick(now)
 			CM.ensureRunning()
 			pcall(CM.cursorTick)   -- other players' cursors (cursors.lua): cosmetic, never the sim
+			pcall(CM.navigationTick)
 			pcall(CM.previewTick)
 
 			-- Commands that asked to be tried again (a VLINE whose line has not
@@ -1190,6 +1192,7 @@ function data()
 			-- other players' cursors (cursors.lua): every frame, so the circles glide; ahead of
 			-- the panel's own twice-a-second refresh
 			if CM.cursorGuiTick then pcall(CM.cursorGuiTick) end
+			pcall(CM.navigationGuiTick)
 			if not CM.recoveryGuiHeld() then pcall(CM.previewGuiTick) end
 			if guiTick % 30 ~= 0 then return end
 			pcall(function()
@@ -1385,6 +1388,7 @@ function data()
 					local togC = api.gui.comp.Component.new("mpToggles")
 					togC:setLayout(tog)
 					box:addItem(togC)
+					CM.navigationPanel(box, present)
 					-- ---- host speed buttons (2026-09-12) ----
 					-- Shown on the host's window only. A press appends SPEEDSET <v> to our
 					-- inject file; the host's pacer makes it the session speed

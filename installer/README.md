@@ -214,7 +214,7 @@ powershell -ExecutionPolicy Bypass -File installer\build_msi.ps1 [-AcceptWixEula
 | `-Validate` | after building, run an administrative install into a temporary folder and list what it extracted |
 | `-Version x.y.z` | stamp this version instead of `installer\VERSION` |
 | `-AcceptWixEula` | pass `--acceptEula wix7` to `wix build` |
-| `-IncludePreviews` | build and package the optional preview DLL alongside its committed Lua integration |
+| `-IncludePreviews` | accepted for compatibility; the preview DLL is always built and packaged since 0.4.22 |
 
 What it does:
 

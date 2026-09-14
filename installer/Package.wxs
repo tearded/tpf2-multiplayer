@@ -109,9 +109,6 @@
       <ComponentGroupRef Id="PluginHostShared" />
       <ComponentGroupRef Id="GameFolderFiles" />
       <ComponentGroupRef Id="ModFiles" />
-      <?ifdef PreviewDll ?>
-      <ComponentGroupRef Id="PreviewPlugin" />
-      <?endif?>
     </Feature>
 
     <!-- Custom actions and their sequencing: PluginHost.wxs. -->

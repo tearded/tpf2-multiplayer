@@ -152,13 +152,7 @@ if ($SkipBuild) {
     if ($rc -ne 0) { Fail "build.bat previews failed (exit $rc)" }
 }
 $proxyDll = Join-Path $BridgeOut "alut.dll"
-if ($IncludePreviews) {
-    if (-not $SkipBuild) {
-        $rc = Run-Bat (Join-Path $Bridge 'build.bat') 'previews'
-        if ($rc -ne 0) { Fail 'Preview plugin build failed' }
-    }
-    if (-not (Test-Path (Join-Path $BridgeOut 'tpf2_previews.dll'))) { Fail 'Preview plugin DLL missing' }
-}
+# -IncludePreviews is kept for callers; upstream's Package.wxs always packages tpf2_previews.dll.
 $hostDll  = Join-Path $BridgeOut "tpf2_pluginhost.dll"
 foreach ($f in @($proxyDll, $hostDll, (Join-Path $BridgeOut "tpf2_bridge_mp.dll"), $menuDll, $sliceDll, (Join-Path $BridgeOut "tpf2_previews.dll"))) {
     if (-not (Test-Path $f)) { Fail "missing: $f" }
@@ -219,9 +213,6 @@ $wixArgs = @("build") + $eula + @(
     (Join-Path $Installer "PluginHost.wxs")
 )
 Say "wix $($wixArgs -join ' ')"
-if ($IncludePreviews) {
-    $wixArgs += @('-d', "PreviewDll=$(Join-Path $BridgeOut 'tpf2_previews.dll')", (Join-Path $Installer 'PreviewPlugin.wxs'))
-}
 Push-Location $Installer
 try {
     $wixOut = & $Wix @wixArgs 2>&1 | ForEach-Object { "$_" }

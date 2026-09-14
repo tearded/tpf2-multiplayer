@@ -76,7 +76,7 @@ assert(#B.moves==0) -- presence never steals the camera
 goA.click(); assert(#B.moves==1 and B.moves[1][1]==100 and B.moves[1][3]==500)
 
 -- Mouse ping -> sender GUI -> engine -> dropped packet -> retry -> peer GUI.
-FILES['a/tpf2mp_ping_key.txt']='11 12345\nend\n'
+FILES['a/tpf2mp_ping_key.txt']='11 12345\r\nend\r\n' -- native Windows text stream
 run(0.7,true); run(1.5)
 assert(B.zones.mpping_a and pingA.enabled)
 assert(#B.moves==1)

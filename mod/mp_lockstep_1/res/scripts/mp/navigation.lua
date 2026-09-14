@@ -42,7 +42,11 @@ local function read(name)
 	local f = io.open(K.BASE .. name, "rb")
 	if not f then return nil end
 	local s = f:read(16385); f:close()
-	if not s or #s > 16384 or s:sub(-5) ~= "\nend\n" then return nil end
+	if not s or #s > 16384 then return nil end
+	-- The native hotkey uses a Windows text stream (CRLF); Lua snapshots are
+	-- binary (LF). Normalize before validating the complete-file terminator.
+	s = s:gsub("\r\n", "\n")
+	if s:sub(-5) ~= "\nend\n" then return nil end
 	return s:sub(1, -6)
 end
 

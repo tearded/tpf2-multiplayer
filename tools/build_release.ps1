@@ -19,7 +19,11 @@ python tools/luacheck.py
 if ($LASTEXITCODE -ne 0) { throw 'Lua syntax checks failed' }
 python tools/resync_test.py
 if ($LASTEXITCODE -ne 0) { throw 'Automatic resync regression failed' }
-foreach ($testName in @('test_sync_operation.py', 'test_sync_snapshot.py', 'test_sync_runtime.py', 'test_auto_sync_lobby.py', 'test_desync_report_reload.py', 'test_net_epoch.py', 'test_native_control.py')) {
+foreach ($players in @(3, 5, 8)) {
+    python tools/test_auto_sync_lobby.py --players $players
+    if ($LASTEXITCODE -ne 0) { throw "Recovery regression failed for $players players" }
+}
+foreach ($testName in @('test_sync_operation.py', 'test_sync_snapshot.py', 'test_sync_runtime.py', 'test_sync_readiness.py', 'test_auto_sync_lobby.py', 'test_desync_report_reload.py', 'test_net_epoch.py', 'test_net_multipeer.py', 'test_native_control.py')) {
     python (Join-Path tools $testName)
     if ($LASTEXITCODE -ne 0) { throw "Recovery regression failed: $testName" }
 }

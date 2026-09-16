@@ -22,6 +22,8 @@ if ($extractProcess.ExitCode -ne 0) { throw "MSI extraction failed: $extractLog"
 $payloadRoot = Join-Path $extractRoot 'PFiles/Steam/steamapps/common/Transport Fever 2'
 $expectedFiles = @{}
 foreach ($dllName in @('alut.dll','tpf2_pluginhost.dll','tpf2_bridge_mp.dll','tpf2_menu.dll','tpf2_slice.dll')) { $expectedFiles[$dllName] = Join-Path $packageRepo "native/out/$dllName" }
+$expectedFiles['plugins/tpf2_workshop_register.dll'] = Join-Path $packageRepo 'native/out/tpf2_workshop_register.dll'
+$expectedFiles['tpf2mp_version.txt'] = Join-Path $packageRepo 'installer/VERSION'
 $expectedFiles['netpunch/netpunch.exe'] = Join-Path $packageRepo 'netpunch/dist/netpunch.exe'
 $expectedFiles['tpf2_slice.cfg'] = Join-Path $packageRepo 'installer/cfg/tpf2_slice.cfg'
 if ($IncludePreviews) { $expectedFiles['plugins/tpf2_previews.dll'] = Join-Path $packageRepo 'native/out/tpf2_previews.dll' }

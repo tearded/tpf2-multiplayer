@@ -25,11 +25,11 @@ foreach ($players in @(3, 5, 8)) {
     python tools/test_auto_sync_lobby.py --players $players
     if ($LASTEXITCODE -ne 0) { throw "Recovery regression failed for $players players" }
 }
-foreach ($testName in @('test_sync_operation.py', 'test_sync_snapshot.py', 'test_sync_runtime.py', 'test_sync_readiness.py', 'test_auto_sync_lobby.py', 'test_desync_report_reload.py', 'test_net_epoch.py', 'test_net_multipeer.py', 'test_native_control.py')) {
+foreach ($testName in @('test_sync_operation.py', 'test_sync_snapshot.py', 'test_sync_runtime.py', 'test_sync_readiness.py', 'test_auto_sync_lobby.py', 'test_desync_report_reload.py', 'test_net_epoch.py', 'test_net_multipeer.py', 'test_net_restart.py', 'test_net_packet_size.py', 'test_native_control.py')) {
     python (Join-Path tools $testName)
     if ($LASTEXITCODE -ne 0) { throw "Recovery regression failed: $testName" }
 }
-foreach ($testName in @('crossing_replay_test.py','bridge_companion_test.py','edge_demolition_test.py','track_fresh_test.py','delay_hold_test.py','preview_test.py','preview_perf_test.py')) {
+foreach ($testName in @('crossing_replay_test.py','bridge_companion_test.py','edge_demolition_test.py','track_fresh_test.py','delay_hold_test.py','preview_test.py','preview_perf_test.py','speed_vote_test.py','hash_cadence_test.py','hash_bigmap_test.py','version_gate_test.py','updater_test.py','mod_download_test.py','lobby_panel_test.py','chat_directory_test.py','vpos_cap_test.py')) {
     $testPath = Join-Path tools $testName
     if (Test-Path -LiteralPath $testPath) {
         python $testPath

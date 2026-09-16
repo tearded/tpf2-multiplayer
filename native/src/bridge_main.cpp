@@ -140,6 +140,7 @@ struct Config {
 // which is exactly the view the mod shares. `warnMismatch` = complain if the
 // file already names a different instance (only meaningful at startup; a
 // control-file re-identify differs by definition).
+static bool g_entityOwnerReady = false;
 static void WriteIdentity(const std::string& inst, bool warnMismatch)
 {
     std::wstring idPath = g_dataDir + L"tpf2_instance.txt";
@@ -185,6 +186,10 @@ static void WriteIdentity(const std::string& inst, bool warnMismatch)
         uint16_t port = Net_LocalPort();
         if (port) {
             int m = _snprintf_s(buf + n, sizeof(buf) - n, _TRUNCATE, "port=%u\n", port);
+            if (m > 0) n += m;
+        }
+        if (g_entityOwnerReady) {
+            int m = _snprintf_s(buf + n, sizeof(buf) - n, _TRUNCATE, "entity_owner_v1=1\n");
             if (m > 0) n += m;
         }
         DWORD written;
@@ -419,7 +424,7 @@ static void ResetWorldFiles(const char* epoch)
 
 static void ApplyControl(const std::string& text)
 {
-    std::string wantInst, wantIp, wantEpoch;
+    std::string wantInst, wantIp, wantEpoch, wantLobby;
     int wantPort = 0;
     bool havePeer = false;
     size_t pos = 0;
@@ -435,6 +440,8 @@ static void ApplyControl(const std::string& text)
         if ((ln.size() == 10 || ln.size() == 11) && ln.rfind("instance=", 0) == 0 && ln[9] >= 'a' && ln[9] <= 'z'
             && (ln.size() == 10 || (ln[10] >= 'a' && ln[10] <= 'z'))) {   // a..z, then aa..: up to 702 players
             wantInst = ln.substr(9);
+        } else if (ln.rfind("lobby=", 0) == 0) {
+            wantLobby = ln.substr(6);
         } else if (ln.rfind("epoch=", 0) == 0) {
             wantEpoch = ln.substr(6);
         } else if (sscanf(ln.c_str(), "peer=%63[0-9.]:%d", ip, &port) == 2) {
@@ -467,6 +474,12 @@ static void ApplyControl(const std::string& text)
             differs = wantInst != g_rt.instance;
         }
         if (differs) Reidentify(wantInst);
+    }
+    if (!wantLobby.empty()) {
+        if(!havePeer || !Net_BeginLobby(wantLobby.c_str(),wantIp.c_str(),wantPort,ResetWorldFiles)) {
+            Log("[ctl] invalid lobby boundary rejected\n");
+            return;
+        }
     }
     if (!wantEpoch.empty() && !Net_SetWorldEpoch(wantEpoch.c_str(), ResetWorldFiles))
         Log("[ctl] invalid world epoch rejected\n");
@@ -619,6 +632,10 @@ static DWORD WINAPI InitThread(LPVOID)
     // port the socket really bound)
     OpenEventsFile(cfg.instance);
 
+    // The transport's own lines: who joined the cohort, who was evicted, what
+    // was dropped and why. Until 2026-09-15 a joiner that could never hear the
+    // host showed nothing here but "peer=DOWN".
+    Net_SetLogger([](const char* line) { Log("%s", line); });
     bool netUp = Net_Init(cfg.localPort, cfg.peerIp, cfg.peerPort, OnPeerLine);
 
     // The election is CHECK-then-BIND, and the two halves are seconds apart:
@@ -692,7 +709,8 @@ static DWORD WINAPI InitThread(LPVOID)
     // setPlayer on a track, road, node, signal, station or line-less vehicle
     // re-owns it instead of asserting with a crash dump (setplayer_patch.cpp):
     // a company switch calls it on everything the player owns.
-    SetPlayerPatch_Install(Log);
+    g_entityOwnerReady = SetPlayerPatch_Install(Log);
+    WriteIdentity(cfg.instance, false);
 
     // Transport health, from our own thread every 10 s. A line is written only
     // when a figure moved, so an idle bridge does not repeat itself all session.
@@ -700,15 +718,15 @@ static DWORD WINAPI InitThread(LPVOID)
         char last[192] = "";
         while (!g_stopping) {
             Sleep(10000);
-            uint64_t dNoPeer = 0, dOverflow = 0, dOversize = 0;
-            size_t pending = 0; bool alive = false;
-            Net_Stats(&dNoPeer, &dOverflow, &pending, &alive, &dOversize);
+            uint64_t dNoPeer = 0, dOverflow = 0, dOversize = 0, dWorld = 0;
+            size_t pending = 0, members = 0; bool alive = false;
+            Net_Stats(&dNoPeer, &dOverflow, &pending, &alive, &dOversize, &members, &dWorld);
             char cur[192];
             _snprintf_s(cur, sizeof(cur), _TRUNCATE,
-                "peer=%s pending=%zu dropped=%llu/%llu/%llu strangers=%llu",
-                alive ? "up" : "DOWN", pending,
+                "peer=%s members=%zu pending=%zu dropped=%llu/%llu/%llu other-world=%llu strangers=%llu",
+                alive ? "up" : "DOWN", members, pending,
                 (unsigned long long)dNoPeer, (unsigned long long)dOverflow,
-                (unsigned long long)dOversize,
+                (unsigned long long)dOversize, (unsigned long long)dWorld,
                 (unsigned long long)Net_DroppedStrangers());
             if (strcmp(cur, last) == 0) continue;
             strcpy_s(last, cur);

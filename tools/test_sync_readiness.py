@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'netpunch'))
-from sync_lobby import HostRecovery, ClientRecovery
+from sync_lobby import HostRecovery, ClientRecovery, ui_state
 
 
 class ReadinessTests(unittest.TestCase):
@@ -16,6 +16,34 @@ class ReadinessTests(unittest.TestCase):
         self.host = HostRecovery(self.runtime, 'host', self.io, Mock(),
             lambda: self.members, lambda: [], Mock())
         return self.host
+
+    def test_unavailable_request_explains_why_without_starting(self):
+        for count in (2, 3):
+            h = self.make_host(count)
+            h.is_available = lambda: False
+            h.unavailable_reason = lambda: 'A player is receiving the save.'
+            h.command('host', dict(cmd='sync_request', id='blocked'))
+            self.assertIsNone(h.barrier.operation)
+            self.io.emit.assert_called_with(dict(type='sync_feedback',
+                detail='A player is receiving the save.'))
+
+    def test_repeated_request_shows_current_readiness(self):
+        h = self.make_host(3)
+        h.command('host', dict(cmd='sync_request', id='first'))
+        token = h.readiness['token']
+        self.io.reset_mock()
+        h.command('host', dict(cmd='sync_request', id='second'))
+        self.assertEqual(h.readiness['token'], token)
+        self.assertEqual(self.io.emit.call_args.args[0]['ready_count'], 1)
+        self.assertIsNone(h.barrier.operation)
+
+    def test_ui_preserves_failure_step_and_reason(self):
+        state = dict(phase='error', error=dict(step='loading', detail='Player p1 timed out'))
+        message = ui_state(state)
+        self.assertEqual(message['step'], 'loading')
+        self.assertEqual(message['detail'], 'Player p1 timed out')
+        self.assertNotIn('detail', state)
+        self.assertEqual(ui_state(dict(phase='holding', error=None))['detail'], '')
 
     def test_host_only_two_player_start(self):
         h = self.make_host(2)
@@ -87,6 +115,52 @@ class ReadinessTests(unittest.TestCase):
         client.command(dict(cmd='sync_request', id='blocked'))
         client.command(dict(cmd='sync_retry', id='blocked2'))
         self.assertFalse(client.pending)
+
+    def test_join_gate_releases_once_the_recovery_is_over(self):
+        # A finished or aborted recovery keeps its operation token (nothing ever
+        # sets it back to None). The join gate must read the PHASE: reading the
+        # token alone rejected every new joiner for the rest of the lobby's life,
+        # seen in a brand-new game after one resync (2026-09-15).
+        h = self.make_host(2)
+        self.assertFalse(h.roster_locked)
+        h.command('host', dict(cmd='sync_request', id='start'))
+        self.assertEqual(h.barrier.phase, 'holding')
+        self.assertTrue(h.roster_locked)
+        operation = h.barrier.operation
+        h.barrier._enter('complete')
+        self.assertEqual(h.barrier.operation, operation)   # the token lingers: that was the trap
+        self.assertFalse(h.roster_locked)
+        h = self.make_host(2)
+        h.command('host', dict(cmd='sync_request', id='again'))
+        self.assertTrue(h.roster_locked)
+        h.barrier.abort('host', h.barrier.operation)
+        self.assertEqual(h.barrier.phase, 'aborted')
+        self.assertFalse(h.roster_locked)
+
+    def test_transport_lobby_follows_a_completed_resync_only(self):
+        # After a resync every member's bridge runs in the operation's epoch. A
+        # player who joins later takes the lobby nonce from welcome/roster, so that
+        # nonce must BE the epoch once the operation completes -- and not before
+        # (the join gate is shut while it runs; an abort leaves the old world).
+        h = self.make_host(2)
+        self.assertIsNone(h.world_epoch())
+        h.command('host', dict(cmd='sync_request', id='start'))
+        epoch = h.barrier.epoch
+        self.assertEqual(h.barrier.phase, 'holding')
+        self.assertRegex(epoch, r'^[0-9a-f]{32}$')
+        for phase in ('holding', 'saving', 'transferring', 'loading', 'checking', 'releasing'):
+            h.barrier._enter(phase)
+            self.assertIsNone(h.world_epoch(), phase)
+        h.barrier._enter('complete')
+        self.assertEqual(h.world_epoch(), epoch)
+        h = self.make_host(2)
+        h.command('host', dict(cmd='sync_request', id='again'))
+        h.barrier.abort('host', h.barrier.operation)
+        self.assertIsNone(h.world_epoch())
+        h = self.make_host(2)
+        h.command('host', dict(cmd='sync_request', id='third'))
+        h.barrier.fail('test failure')
+        self.assertIsNone(h.world_epoch())
 
 
 if __name__ == '__main__':

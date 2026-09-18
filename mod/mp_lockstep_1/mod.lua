@@ -26,6 +26,9 @@ nothing is cancelled or replayed.
 			-- compatibility tests. Resource modifiers leave Workshop files intact.
 			addModifier("loadGameScript", function(fileName, script)
 				local name = fileName:gsub("\\", "/")
+				if name == "autosig2.lua" or name:match("/autosig2%.lua$") then
+					return require("mp/autosig_compat").wrap(script)
+				end
 				if name ~= "natural_town_growth.lua" and not name:match("/natural_town_growth%.lua$") then
 					return script
 				end

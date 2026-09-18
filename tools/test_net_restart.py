@@ -122,6 +122,9 @@ int main() {
     send(NEW,world,11,nullptr,0,0xffffffff);  // floor 11: 8 and 9 are gone, 10 is ours
     waitFor([]{return count()==5;});
     assert(lastLine()=="stashed-ten");
+    // Delivery is called before SkipToFloor writes its log on the receive thread.
+    // Observing the callback does not mean the subsequent log is already visible.
+    waitFor([]{return loggedLines("retains nothing before seq 11 and we waited for 8: 1 stashed packet(s) delivered, 2 went by")==1;});
     assert(loggedLines("retains nothing before seq 11 and we waited for 8: 1 stashed packet(s) delivered, 2 went by")==1);
     send(NEW,world,11,"after-skip"); waitFor([]{return count()==6;});
     send(NEW,world,12,"head-",NO_ACK,0,0,2);  // chunk 0 of 2, in order: assembling

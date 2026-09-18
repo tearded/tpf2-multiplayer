@@ -48,6 +48,22 @@ warns when a suffixed build is newer than the one it copies.
 The lobby is frozen with PyInstaller ([netpunch/README.md](../netpunch/README.md#freezing)); the MSI is
 built by `installer\build_msi.ps1` ([installer/README.md](../installer/README.md#building-the-msi)).
 
+The release entry point `tools/build_release.ps1` initializes MSVC once and runs
+four independent regression groups concurrently (native, lobby, logic and recovery).
+Native compiler tests and relay/lobby tests remain sequential within their groups.
+Recovery covers the same 2/3/5/8-player scenarios with separate temporary files and
+OS-assigned ports, using at most two processes alongside the other groups. Every
+group must pass before packaging; missing test files fail the build. Updater tests
+run once against the freshly built MSI, rather than also against an older package.
+Package validation and release download/hash checks remain mandatory.
+
+`python tools/run_release_tests.py --jobs 1` runs the same tests serially for
+comparison; `tools/build_release.ps1 -TestJobs 1` applies that to the full build.
+Per-test logs and `timings.json` are kept under `.local-test/release-tests/run-*`.
+The build also prints regression, packaging and total durations. The standalone
+`tools/run_recovery_matrix.py` still supports `--jobs 1` through `--jobs 4`.
+CI cancels superseded builds on the same branch/PR, but never cancels release tags.
+
 ## Putting a build into your game
 
 - **The mod.** `python tools\luacheck.py`, then `powershell -File tools\deploy_mod.ps1`

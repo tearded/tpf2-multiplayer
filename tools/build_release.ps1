@@ -1,6 +1,6 @@
 <# Builds the committed checkout; never installs into a live game. #>
 [CmdletBinding()]
-param()
+param([ValidateRange(1,4)][int]$TestJobs = 4)
 $ErrorActionPreference = 'Stop'
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
@@ -15,34 +15,22 @@ if ($lobbySource -notmatch ('(?m)^LOBBY_VERSION = "' + [regex]::Escape($packageV
 if ($env:GITHUB_REF -like 'refs/tags/*' -and $env:GITHUB_REF -cne "refs/tags/v$packageVersion") { throw 'Release tag must equal v<installer/VERSION>' }
 if ($env:GITHUB_REF -like 'refs/tags/*' -and -not (Test-Path -LiteralPath "docs/releases/$packageVersion.md")) { throw 'A release needs docs/releases/<version>.md, including known issues and validation' }
 
-python tools/luacheck.py
-if ($LASTEXITCODE -ne 0) { throw 'Lua syntax checks failed' }
-python tools/resync_test.py
-if ($LASTEXITCODE -ne 0) { throw 'Automatic resync regression failed' }
-python tools/navigation_test.py
-if ($LASTEXITCODE -ne 0) { throw 'Map navigation regression failed' }
-foreach ($players in @(3, 5, 8)) {
-    python tools/test_auto_sync_lobby.py --players $players
-    if ($LASTEXITCODE -ne 0) { throw "Recovery regression failed for $players players" }
-}
-foreach ($testName in @('test_sync_operation.py', 'test_sync_snapshot.py', 'test_sync_runtime.py', 'test_sync_readiness.py', 'test_auto_sync_lobby.py', 'test_desync_report_reload.py', 'test_net_epoch.py', 'test_net_multipeer.py', 'test_net_restart.py', 'test_net_packet_size.py', 'test_native_control.py')) {
-    python (Join-Path tools $testName)
-    if ($LASTEXITCODE -ne 0) { throw "Recovery regression failed: $testName" }
-}
-foreach ($testName in @('crossing_replay_test.py','bridge_companion_test.py','edge_demolition_test.py','track_fresh_test.py','delay_hold_test.py','preview_test.py','preview_perf_test.py','speed_vote_test.py','hash_cadence_test.py','hash_bigmap_test.py','version_gate_test.py','updater_test.py','mod_download_test.py','lobby_panel_test.py','chat_directory_test.py','vpos_cap_test.py')) {
-    $testPath = Join-Path tools $testName
-    if (Test-Path -LiteralPath $testPath) {
-        python $testPath
-        if ($LASTEXITCODE -ne 0) { throw "Regression failed: $testName" }
+$releaseClock = [Diagnostics.Stopwatch]::StartNew()
+$env:TPF2_BUILD_NO_DEPLOY = '1'
+# Initialize once; native builds and compiler tests inherit the same x64 tools.
+# msvc_env.bat already validates and reuses this environment on subsequent calls.
+$compilerEnvironment = cmd /d /c 'call tools\msvc_env.bat && set'
+if ($LASTEXITCODE -ne 0) { throw 'MSVC environment initialization failed' }
+foreach ($environmentLine in $compilerEnvironment) {
+    $separator = $environmentLine.IndexOf('=')
+    if ($separator -gt 0) {
+        [Environment]::SetEnvironmentVariable($environmentLine.Substring(0, $separator), $environmentLine.Substring($separator + 1), 'Process')
     }
 }
-python tools/relay_selftest.py
-if ($LASTEXITCODE -ne 0) { throw 'Relay self-test failed' }
-foreach ($testName in @('resync_load_keeps_lobby_test.py','hotjoin_stage_test.py','late_loader_test.py','lobby_mode_test.py','test_lobby_limits.py','test_player_stats.py')) {
-    python (Join-Path tools $testName)
-    if ($LASTEXITCODE -ne 0) { throw "Upstream 0.6 regression failed: $testName" }
-}
-$env:TPF2_BUILD_NO_DEPLOY = '1'
+python tools/run_release_tests.py --jobs $TestJobs
+if ($LASTEXITCODE -ne 0) { throw 'Release regressions failed; see per-test logs above' }
+Write-Host ('[timing] regressions: {0:N1}s' -f $releaseClock.Elapsed.TotalSeconds)
+$packageClock = [Diagnostics.Stopwatch]::StartNew()
 $withPreviews = Test-Path -LiteralPath native/src/preview_plugin.cpp
 if ($withPreviews) {
     if (-not (Test-Path mod/mp_lockstep_1/res/scripts/mp/previews.lua) -or
@@ -67,3 +55,5 @@ $sourceCommit = (git rev-parse HEAD).Trim()
     ConvertTo-Json | Set-Content -Encoding utf8 installer/out/build-info.json
 if ($env:GITHUB_OUTPUT) { "version=$packageVersion" | Add-Content -LiteralPath $env:GITHUB_OUTPUT }
 if ($env:GITHUB_STEP_SUMMARY) { "Built and hash-verified TpF2Multiplayer.msi **$packageVersion** from commit $sourceCommit. Preview plugin: $withPreviews. No game installation or play test performed." | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY }
+
+Write-Host ('[timing] build/package/validation: {0:N1}s; total: {1:N1}s' -f $packageClock.Elapsed.TotalSeconds, $releaseClock.Elapsed.TotalSeconds)

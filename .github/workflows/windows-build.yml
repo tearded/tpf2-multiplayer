@@ -17,7 +17,8 @@ env:
 
 concurrency:
   group: windows-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  # Superseded branch/PR builds need not delay the newest one. Release tags finish.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build:

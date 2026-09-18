@@ -408,13 +408,22 @@ function CM.applyEdgeOwner(edge, cid)
 	if CM.cmMode == "companies" then pid = (CM.cmCompanyPid or {})[cid]
 	elseif cid == 1 then pid = api.engine.util.getPlayer() end
 	assert(type(pid) == "number" and pid >= 0, "edge owner company is unavailable")
-	edge.playerOwned = { player = pid }
+	-- The engine silently drops a Lua table assigned to this optional component.
+	local owner = api.type.PlayerOwned.new()
+	owner.player = pid
+	edge.playerOwned = owner
 end
 
 local function copyEdgeProps(dst, srcEid, isTrack, stype)
 	-- Splits and unchanged bridge companions retain THIS edge's owner, not the builder's.
 	local owner = api.engine.getComponent(srcEid, api.type.ComponentType.PLAYER_OWNED)
-	dst.playerOwned = owner and { player = owner.player } or nil
+	if owner then
+		local copied = api.type.PlayerOwned.new()
+		copied.player = owner.player
+		dst.playerOwned = copied
+	else
+		dst.playerOwned = nil
+	end
 	-- A half of a split edge keeps the split edge's BRIDGE/TUNNEL type too
 	-- (BaseEdge.type 0 ground / 1 bridge / 2 tunnel, typeIndex = the type's
 	-- resource index, -1 on the ground). Callers stamp 0/-1 first; override.

@@ -16,8 +16,20 @@ lua.execute(r'''
 local nodes, edges, streetMap, trackMap, proposals, logs, models
 local CT = {BASE_NODE=1,BASE_EDGE=2,BASE_EDGE_STREET=3,BASE_EDGE_TRACK=4,MODEL_INSTANCE_LIST=5,PLAYER_OWNED=6}
 local function vec(x,y,z) return {x=x,y=y,z=z} end
-local function edgeNew() return {comp={objects={}}} end
+local ownerType = {}
+local function edgeNew()
+  local owner
+  return setmetatable({comp={objects={}}}, {
+    __index=function(_,k) if k=='playerOwned' then return owner end end,
+    __newindex=function(t,k,v)
+      if k=='playerOwned' then
+        -- Observed on the live engine: ordinary tables silently clear it.
+        owner = getmetatable(v)==ownerType and v or nil
+      else rawset(t,k,v) end
+    end})
+end
 api={type={ComponentType=CT,Vec3f={new=vec},
+  PlayerOwned={new=function() return setmetatable({},ownerType) end},
   NodeAndEntity={new=function() return {comp={}} end},
   SegmentAndEntity={new=edgeNew},
   BaseEdgeTrack={new=function() return {} end},

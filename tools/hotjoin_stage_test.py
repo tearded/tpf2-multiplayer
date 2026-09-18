@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'netpunch'))
 import lobby
 
 
+
 def make_world(directory, name, filler, size):
     """A .sav (several chunks long, so the sender crosses 10% steps) with a
     .sav.lua beside it that names lockstep.lua -- what the host's mod check
@@ -127,16 +128,16 @@ with tempfile.TemporaryDirectory() as temporary:
         assert wait_for(lambda: stage_of('client1') == 'save received, loading', 'the done stage')
         pcts = [int(m.group(1)) for l in sender_lines()
                 for m in [re.search(r'receiving save (\d+)%', l)] if m]
-        # On loopback the whole file is in flight at once (SEND_WINDOW_LOCAL), so
-        # the sender's own view jumps from 0 to the end and its end step usually
-        # loses to the joiner's own 100% (the merge rule); the 10% steps in
-        # between are the joiner's reports. What the sender must do is open the
-        # sequence with 0% before any joiner report, and never go backwards.
-        check('the host log shows the sender opening the roster at 0% and never regressing',
-              bool(pcts) and pcts[0] == 0 and pcts == sorted(pcts), str(pcts))
-        check('the sender\'s first word came before any joiner report',
-              bool(sender_lines()) and 'receiving save 0%' in sender_lines()[0], (sender_lines() or ['none'])[0])
+        # The receive thread can acknowledge data before the host loop samples
+        # the sender, on either TCP or UDP. Its first sampled percentage need
+        # not be zero; progress must stay bounded and never go backwards.
+        check('the sender reports bounded progress without regressing',
+              bool(pcts) and all(0 <= p <= 100 for p in pcts) and pcts == sorted(pcts), str(pcts))
         history = stage_history('client1')
+        roster_pcts = [int(m.group(1)) for s in history
+                       for m in [re.fullmatch(r'receiving save (\d+)%', s)] if m]
+        check('the combined roster progress never regresses',
+              bool(roster_pcts) and roster_pcts == sorted(roster_pcts), str(roster_pcts))
         check('the roster went through receiving stages to "save received, loading"',
               any(s.startswith('receiving save ') for s in history) and history[-1] == 'save received, loading',
               ' | '.join(history))

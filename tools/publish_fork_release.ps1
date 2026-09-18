@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param()
 $ErrorActionPreference = 'Stop'
-if ($env:GITHUB_REPOSITORY -cne 'tearded/tpf2-multiplayer' -or $env:GITHUB_EVENT_NAME -ne 'push' -or $env:GITHUB_REF -notmatch '^refs/tags/v\d+\.\d+\.\d+$') { throw 'Publication requires a version tag push in the fork' }
+if ($env:GITHUB_REPOSITORY -cne 'tearded/tpf2-multiplayer' -or $env:GITHUB_EVENT_NAME -ne 'push' -or $env:GITHUB_REF -notmatch '^refs/tags/v\d+\.\d+(\.\d+){0,2}$') { throw 'Publication requires a version tag push in the fork' }
 $releaseTag = $env:GITHUB_REF.Substring('refs/tags/'.Length)
 $releaseVersion = $releaseTag.Substring(1)
 $releaseRepo = Split-Path $PSScriptRoot -Parent
@@ -20,7 +20,7 @@ $releaseList = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | Con
 if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect existing releases' }
 $existingRelease = @($releaseList | Where-Object tag_name -eq $releaseTag)
 if ($existingRelease.Count -gt 0) { throw 'This version already has a release or draft. Existing assets are never replaced; use a new version or review the failed draft.' }
-foreach ($publishedRelease in @($releaseList | Where-Object { -not $_.draft -and -not $_.prerelease -and $_.tag_name -match '^v\d+\.\d+\.\d+$' })) {
+foreach ($publishedRelease in @($releaseList | Where-Object { -not $_.draft -and -not $_.prerelease -and $_.tag_name -match '^v\d+\.\d+(\.\d+){0,2}$' })) {
     if ([version]$publishedRelease.tag_name.Substring(1) -ge [version]$releaseVersion) { throw 'A launcher release must be newer than every published fork release' }
 }
 gh release create $releaseTag --repo $env:GITHUB_REPOSITORY --verify-tag --draft --title "Fork $releaseVersion" --notes-file $notesOut installer/out/TpF2Multiplayer.msi installer/out/SHA256SUMS.txt installer/out/build-info.json

@@ -139,7 +139,7 @@ T=T+0.2; B.CM.navigationGuiTick(); assert(B.zones.mpping_a)
 T=T+4; B.CM.navigationGuiTick(); assert(not B.zones.mpping_a)
 
 -- The real network dispatcher must route LSNAV outside the build-command queue.
-local CNet, KNet = {}, {EVENTS_FILE='events'}
+local CNet, KNet = {ticks=1}, {EVENTS_FILE='events'}
 assert(load(NET,'net'))()(CNet,KNet,function(err) error(err) end)
 CNet.histPump=function() end
 local routed

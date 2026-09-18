@@ -48,7 +48,7 @@ Build and package tpf2_previews.dll when the optional preview sources and Lua
 integration are part of the checkout. CI checks that they are present together.
 
 .PARAMETER Version
-Package version (three-part). Defaults to the contents of installer\VERSION, which
+Package version (0.x.y, or 0.x.y.z for a bugfix). Defaults to the contents of installer\VERSION, which
 is the single source of truth for what a release is called -- every 0.1.x MSI up to
 2026-08-30 shipped as ProductVersion 0.1.0 because this defaulted to a literal, so
 Windows showed the same version for every build and could not tell an upgrade from
@@ -65,7 +65,8 @@ param(
     [switch]$Validate,
     [switch]$AcceptWixEula,
     [switch]$IncludePreviews,
-    [ValidatePattern('^\d+\.\d+\.\d+$')]
+    # two to four parts (the body checks the same); a two-part version is padded for the package below
+    [ValidatePattern('^\d+\.\d+(\.\d+){0,2}$')]
     [string]$Version
 )
 
@@ -76,7 +77,11 @@ if (-not $Version) {
     $vf = Join-Path $PSScriptRoot "VERSION"
     if (-not (Test-Path $vf)) { throw "installer\VERSION is missing and no -Version was given" }
     $Version = (Get-Content $vf -Raw).Trim()
-    if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "installer\VERSION does not contain a three-part version: '$Version'" }
+    # 0.x (a major feature), 0.x.y (a minor one) or 0.x.y.z (a bugfix). Windows
+    # Installer wants at least three parts and ignores a fourth when it compares
+    # versions; AllowSameVersionUpgrades in Package.wxs is what lets 0.5.7.1 install
+    # over 0.5.7. A two-part version is padded to 0.x.0 for the package only.
+    if ($Version -notmatch '^\d+\.\d+(\.\d+){0,2}$') { throw "installer\VERSION does not contain a version of two to four parts: '$Version'" }
 }
 $Repo      = Split-Path -Parent $Installer
 $Bridge    = Join-Path $Repo "native"
@@ -177,6 +182,11 @@ if ($SkipBuild) {
     } finally { Pop-Location }
 }
 if (-not (Test-Path $netExe)) { Fail "missing: $netExe" }
+# Wine relocates the lobby's bundled miniupnpc DLL and its duplicated relocation
+# entries then crash every host under Proton; the repair (tools\proton\install.py,
+# pinned to that DLL) changes nothing else and is a no-op once applied.
+& python (Join-Path $Repo "tools\proton\install.py") --repair-lobby $netExe
+if ($LASTEXITCODE -ne 0) { Fail "lobby relocation repair failed" }
 
 # ---- 3. custom-action DLL ------------------------------------------------
 if ($SkipBuild -and (Test-Path $caDll)) {
@@ -204,7 +214,7 @@ New-Item -ItemType Directory -Force $OutDir | Out-Null
 $wixArgs = @("build") + $eula + @(
     "-arch", "x64",
     "-ext", "WixToolset.UI.wixext",
-    "-d", "ProductVersion=$Version",
+    "-d", "ProductVersion=$(if ($Version -match '^\d+\.\d+$') { "$Version.0" } else { $Version })",
     "-d", "ProxyDll=$proxyDll",
     "-d", "HostDll=$hostDll",
     "-d", "MenuDll=$menuDll",
@@ -227,9 +237,16 @@ if ($rc -ne 0) { Fail "wix build failed (exit $rc)" }
 if (-not (Test-Path $Msi)) { Fail "wix reported success but $Msi is missing" }
 Say "built $Msi ($([math]::Round((Get-Item $Msi).Length / 1MB, 1)) MB, version $Version)" Green
 
-# Ship this alongside the MSI in the GitHub release for user-local updates.
+# The user-local update bundle, built from the same outputs. It is NOT a release
+# asset: the release publishes only the MSI and the in-game updater extracts its
+# payload from that (netpunch/updater.py msi_payload). The zip is the offline test
+# fixture and a fallback the updater still accepts; tools/updater_test.py checks
+# that the two payloads agree byte for byte.
 & python (Join-Path $Repo "tools\build_update.py")
 if ($LASTEXITCODE -ne 0) { Fail "automatic update bundle build failed" }
+# The MSI's files as a plain archive, for the Proton installer and manual installs.
+& python (Join-Path $Repo "tools\build_files_zip.py")
+if ($LASTEXITCODE -ne 0) { Fail "files archive build failed" }
 
 # ---- 5. optional validation ----------------------------------------------
 if ($Validate) {

@@ -7,9 +7,9 @@ $env:PYTHONIOENCODING = 'utf-8'
 $repoRoot = Split-Path $PSScriptRoot -Parent
 Set-Location $repoRoot
 $packageVersion = (Get-Content installer/VERSION -Raw).Trim()
-if ($packageVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'installer/VERSION must contain X.Y.Z' }
+if ($packageVersion -notmatch '^\d+\.\d+(\.\d+){0,2}$') { throw 'installer/VERSION must contain two to four numeric parts' }
 $versionParts = $packageVersion.Split('.') | ForEach-Object { [int]$_ }
-if ($versionParts[0] -gt 255 -or $versionParts[1] -gt 255 -or $versionParts[2] -gt 65535) { throw 'Version exceeds MSI version limits' }
+if ($versionParts[0] -gt 255 -or $versionParts[1] -gt 255 -or ($versionParts.Count -ge 3 -and $versionParts[2] -gt 65535) -or ($versionParts.Count -eq 4 -and $versionParts[3] -gt 65535)) { throw 'Version exceeds MSI version limits' }
 $lobbySource = Get-Content netpunch/lobby.py -Raw
 if ($lobbySource -notmatch ('(?m)^LOBBY_VERSION = "' + [regex]::Escape($packageVersion) + '"\r?$')) { throw 'LOBBY_VERSION and installer/VERSION must match' }
 if ($env:GITHUB_REF -like 'refs/tags/*' -and $env:GITHUB_REF -cne "refs/tags/v$packageVersion") { throw 'Release tag must equal v<installer/VERSION>' }
@@ -38,6 +38,10 @@ foreach ($testName in @('crossing_replay_test.py','bridge_companion_test.py','ed
 }
 python tools/relay_selftest.py
 if ($LASTEXITCODE -ne 0) { throw 'Relay self-test failed' }
+foreach ($testName in @('resync_load_keeps_lobby_test.py','hotjoin_stage_test.py','late_loader_test.py','lobby_mode_test.py','test_lobby_limits.py','test_player_stats.py')) {
+    python (Join-Path tools $testName)
+    if ($LASTEXITCODE -ne 0) { throw "Upstream 0.6 regression failed: $testName" }
+}
 $env:TPF2_BUILD_NO_DEPLOY = '1'
 $withPreviews = Test-Path -LiteralPath native/src/preview_plugin.cpp
 if ($withPreviews) {

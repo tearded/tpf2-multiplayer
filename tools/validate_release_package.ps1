@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version,
+    [Parameter(Mandatory)][ValidatePattern('^\d+\.\d+(\.\d+){0,2}$')][string]$Version,
     [switch]$IncludePreviews
 )
 $ErrorActionPreference = 'Stop'
@@ -13,7 +13,8 @@ $packageQuery.Execute()
 $packageProperties = @{}
 while ($packageRow = $packageQuery.Fetch()) { $packageProperties[$packageRow.StringData(1)] = $packageRow.StringData(2) }
 $packageQuery.Close()
-if ($packageProperties.ProductVersion -ne $Version -or $packageProperties.ProductName -ne 'TpF2 Multiplayer' -or $packageProperties.UpgradeCode -ne '{80DBF679-F058-410E-9BAD-87731AC96633}') { throw 'MSI metadata does not match the launcher contract' }
+$expectedProductVersion = if ($Version.Split('.').Count -eq 2) { "$Version.0" } else { $Version }
+if ($packageProperties.ProductVersion -ne $expectedProductVersion -or $packageProperties.ProductName -ne 'TpF2 Multiplayer' -or $packageProperties.UpgradeCode -ne '{80DBF679-F058-410E-9BAD-87731AC96633}') { throw 'MSI metadata does not match the launcher contract' }
 $extractRoot = Join-Path $env:TEMP ('tpf2-ci-' + [Guid]::NewGuid().ToString('N').Substring(0,8))
 New-Item -ItemType Directory -Path $extractRoot | Out-Null
 $extractLog = Join-Path $extractRoot 'extract.log'

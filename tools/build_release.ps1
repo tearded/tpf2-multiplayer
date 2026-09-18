@@ -57,6 +57,8 @@ if ($withPreviews) {
 & ./installer/build_msi.ps1 -Version $packageVersion -AcceptWixEula -IncludePreviews:$withPreviews
 if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
 & ./tools/validate_release_package.ps1 -Version $packageVersion -IncludePreviews:$withPreviews
+python tools/updater_test.py
+if ($LASTEXITCODE -ne 0) { throw 'Built MSI updater conversion regression failed' }
 $packagePath = Join-Path $repoRoot 'installer/out/TpF2Multiplayer.msi'
 $packageHash = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText((Join-Path $repoRoot 'installer/out/SHA256SUMS.txt'), "$packageHash  TpF2Multiplayer.msi`n")

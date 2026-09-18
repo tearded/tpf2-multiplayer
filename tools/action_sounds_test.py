@@ -26,6 +26,16 @@ local function runtime(letter)
   return cm
 end
 local engine,gui=runtime("a"),runtime("a")
+local function same(a,b)
+  if type(a)~=type(b) then return false end
+  if type(a)~="table" then return a==b end
+  for k,v in pairs(a) do if not same(v,b[k]) then return false end end
+  for k in pairs(b) do if a[k]==nil then return false end end
+  return true
+end
+assert(same(engine.actionSoundsSave(),gui.actionSoundsSave()),
+  "independent game states must produce identical ScriptSave before simulation")
+print("ok  independent initial ScriptSave states are equal")
 local function emit(op,seq,origin,armed)
   engine.actionSoundSuccess({op=op,seq=seq,origin=origin or "a",armed=armed or 1})
 end
@@ -46,10 +56,17 @@ local saved=engine.actionSoundsSave()
 gui=runtime("a"); gui.actionSoundsLoad(saved); gui.actionSoundsGuiTick(false)
 assert(#sounds==5)
 engine=runtime("a"); engine.actionSoundsLoad(saved); sync()
-assert(#sounds==5 and engine.actionSoundsSave().seq==0)
+assert(#sounds==5 and same(engine.actionSoundsSave(),saved))
+local replica=runtime("a"); replica.actionSoundsLoad(saved)
+assert(same(replica.actionSoundsSave(),engine.actionSoundsSave()))
+local legacy={epoch="table: 0xOLD:12345",seq=7,events={{seq=7,name="buyVehicle"}}}
+local restored=runtime("a"); restored.actionSoundsLoad(legacy)
+assert(same(restored.actionSoundsSave(),legacy))
+restored.actionSoundSuccess({op="VBUY",seq=9,origin="a",armed=1})
+assert(restored.actionSoundsSave().epoch==legacy.epoch and restored.actionSoundsSave().seq==8)
 emit("VBUY",1); sync(); assert(#sounds==6)
 emit("VLINE",2); sync(true); sync(false); assert(#sounds==6)
-print("ok  save/reload/new epoch baseline and recovery suppress stale sounds")
+print("ok  save/load round trip, legacy epoch, silent reload baseline and recovery")
 
 available=false; emit("VBUY",3); sync(); assert(#sounds==6)
 available=true; sync(); assert(#sounds==7)

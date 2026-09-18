@@ -105,8 +105,10 @@ Cancelled local vehicle actions restore their original confirmation sounds throu
 Only successful replay callbacks enqueue audio; uncancelled actions retain their native
 UI feedback, and remote actions remain silent. Batch sales produce one confirmation per
 command. Engine-to-GUI save/load sync carries a bounded cosmetic event history, never
-network packets or simulation RNG. A fresh GUI/engine lifetime establishes a silent
-baseline, so saved confirmations do not play again after loading or resync. The GUI uses
+network packets or simulation RNG. Initial audio state is deterministic and load/save
+preserves it exactly: the engine compares ScriptSave across internal game states at
+startup. A fresh GUI establishes a silent baseline, so saved confirmations do not
+play again after loading or resync. The GUI uses
 the game's [GameUI.playSoundEffect API](https://wiki.transportfever2.com/api/modules/api.gui.html)
 and sound-effect names from `soundeffectsutil.lua`; an audio error does not affect replay.
 New-line creation retains its existing native callback; ambient and vehicle-running audio

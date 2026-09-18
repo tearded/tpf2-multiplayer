@@ -5,9 +5,9 @@ local names = { VBUY = "buyVehicle", VSELL = "sellVehicle", VLINE = "setLine",
                 VDEPOT = "sendToDepot", VREPL = "replaceVehicle" }
 local allowed = {}
 for _, name in pairs(names) do allowed[name] = true end
--- An opaque local lifetime token, not simulation RNG or a network identity.
-local epoch = tostring({}) .. ":" .. tostring(os.time())
-local state = { epoch = epoch, seq = 0, events = {} }
+-- StartGameSim compares ScriptSave from independently created game states.
+-- Initial state must be deterministic; load must preserve the saved state.
+local state = { epoch = "action-sounds-v1", seq = 0, events = {} }
 local seen, order = {}, {}
 local incoming, guiEpoch, guiSeq
 
@@ -24,15 +24,16 @@ function CM.actionSoundSuccess(c)
 	local events = {}
 	for i = math.max(1, #state.events - 30), #state.events do events[#events + 1] = state.events[i] end
 	events[#events + 1] = { seq = state.seq + 1, name = name }
-	state = { epoch = epoch, seq = state.seq + 1, events = events }
+	state = { epoch = state.epoch, seq = state.seq + 1, events = events }
 end
 
 function CM.actionSoundsSave() return state end
 function CM.actionSoundsLoad(s)
 	if type(s) ~= "table" or type(s.epoch) ~= "string" or type(s.seq) ~= "number"
 			or type(s.events) ~= "table" then return end
-	-- First sync / world reload only establishes a baseline. Saved sounds are
-	-- never replayed; the fresh engine factory does not adopt saved audio state.
+	-- Both engine reload and GUI sync must round-trip the same ScriptSave.
+	-- Playback cursors remain private: a fresh GUI silently adopts old events.
+	state = s
 	if guiEpoch ~= s.epoch then guiEpoch, guiSeq = s.epoch, s.seq end
 	incoming = s
 end

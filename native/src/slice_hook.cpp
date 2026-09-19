@@ -189,6 +189,12 @@ static const Factory FACTORIES[] = {
     { 0x9de9e0, 21, 15, "SetGameSpeed",   "speed"   },  // clock buttons only: CaptureSpeedButton
     { 0x9de9b0, 21, 16, "SetDate",          "calendar" },  // editor date picker only: CaptureCalendar
     { 0x9de870, 21, 17, "SetCalendarSpeed", "calendar" },  // editor date speed slider only: CaptureCalendar
+    // The vehicle window's stop/go toggle. Its prologue is byte-for-byte
+    // SendToDepot's (mov rax,rsp / push rdi / sub rsp,0xb70 / mov [rsp+40],-2 =
+    // 20 bytes, checked in the 35924 exe, 2026-09-19): r8 = vehicle, r9 = bool.
+    // A stopped train used to halt on the clicking game only and run on the
+    // peers -- a position desync one stamp later.
+    { 0x9df070, 20, 18, "SetUserStopped", "vehicle" },
 };
 static const int NUM_FACTORIES = (int)(sizeof(FACTORIES) / sizeof(FACTORIES[0]));
 
@@ -1476,6 +1482,7 @@ static bool WriteInjectVBuy(uint64_t depot, uint64_t cfg)
 // command was cancelled.
 //   VSELL  <n> <id..>            SellVehicle  (r8 = &vector<Entity>)
 //   VDEPOT <vehicle> <sell01>    SendToDepot  (r8 = Entity, r9 = bool)
+//   VSTOP  <vehicle> <stopped01> SetUserStopped (r8 = Entity, r9 = bool)
 //   VLINE  <vehicle> <line> <stopIndex>   SetLine (r8, r9 = Entity, st[0] = int)
 //   VREPL  <vehicle> <config..>  ReplaceVehicle (r8 = Entity, r9 = config*)
 // VREPL's payload after the vehicle is byte-for-byte what VBUY writes after the
@@ -1966,6 +1973,9 @@ static bool WriteInjectVehicleCmd(int fid, uint64_t r8, uint64_t r9, uint64_t st
     } else if (fid == 10) {
         fprintf(f, "VREV %d\n", (int)(int32_t)r8);
         Log("[slice] VREV shipped: vehicle=%d\n", (int)(int32_t)r8);
+    } else if (fid == 18) {
+        fprintf(f, "VSTOP %d %d\n", (int)(int32_t)r8, (int)(r9 & 1));
+        Log("[slice] VSTOP shipped: vehicle=%d stopped=%d\n", (int)(int32_t)r8, (int)(r9 & 1));
     } else if (fid == 13) {
         // SetColor(entity, Vec3f const&): r9 points at three floats, 0..1 each.
         float col[3] = { -1.0f, -1.0f, -1.0f };
@@ -2150,7 +2160,8 @@ static void CaptureFactory(const Factory& f, uint64_t rcx, uint64_t rdx, uint64_
     // of this list meant the hook CAPTURED a rename -- '[cap] SetName' is in
     // the log -- and then wrote nothing, so renaming a line looked like a
     // replication failure when it never reached the wire at all.
-    if ((f.id >= 3 && f.id <= 10) || f.id == 13 || f.id == 14) {
+    // 18 (SetUserStopped) is SendToDepot's shape and takes its route.
+    if ((f.id >= 3 && f.id <= 10) || f.id == 13 || f.id == 14 || f.id == 18) {
         bool luaPath = IsScriptCaller(caller);
         if (luaPath) {
             Log("[slice] %s from the Lua path (caller=%llx) -- a replay, not shipped\n",
@@ -4332,7 +4343,7 @@ extern "C" uint64_t DeferHandler(uint64_t rcx, uint64_t rdx, uint64_t r8, uint64
             //
             // _Do_call(this, Command const&) -> rcx = r9, rdx = the Command,
             // which is r8 at this call site.
-            // FIRE-AND-FORGET FIRST. SetLine (6) and Reverse (10) are armed
+            // FIRE-AND-FORGET FIRST. SetLine (6), Reverse (10) and SetUserStopped (18) are armed
             // with g_pendingNoCb=1: nothing waits on their callback, and
             // FIRING it here with the command's success byte still 0 makes the
             // UI take its FAILURE branch -- SetLine then pops "unable to find a
@@ -4522,7 +4533,7 @@ extern "C" uint64_t DeferHandler(uint64_t rcx, uint64_t rdx, uint64_t r8, uint64
         return 0;
     }
 
-    if ((id >= 2 && id <= 10) || id == 13 || id == 14) {
+    if ((id >= 2 && id <= 10) || id == 13 || id == 14 || id == 18) {
         const Factory* f = nullptr;
         for (int i = 0; i < NUM_FACTORIES; i++) if (FACTORIES[i].id == (int)id) f = &FACTORIES[i];
         if (!f) return 0;
@@ -4541,6 +4552,9 @@ extern "C" uint64_t DeferHandler(uint64_t rcx, uint64_t rdx, uint64_t r8, uint64
         //   SellVehicle (3), SendToDepot (5) -- the sell refund moved the
         //                       originator's balance at click time and the
         //                       peers' at the stamp, a coop money-split source.
+        //   SetUserStopped (18) -- the stop/go toggle: applied at click time it
+        //                       halted the train a stamp early on the clicking
+        //                       game only (vehicle drift alarm, 2026-09-19).
         //   UpdateLine (8), DeleteLine (9) -- the new stop list is decoded off
         //                       the command (DecodeLine); CaptureFactory clears
         //                       `cancel` when that decode fails.
@@ -4561,7 +4575,7 @@ extern "C" uint64_t DeferHandler(uint64_t rcx, uint64_t rdx, uint64_t r8, uint64
         //                       originator's own replay at the stamp instead.
         const bool luaPath = IsScriptCaller(caller);
         const bool strictId = (id == 2 || id == 3 || id == 4 || id == 5 ||
-                               id == 6 || id == 8 || id == 9 || id == 10) ||
+                               id == 6 || id == 8 || id == 9 || id == 10 || id == 18) ||
                               (id == 7 && caller == CALLER_UI_CREATELINE);
         bool cancel = !luaPath && strictId;
         __try {

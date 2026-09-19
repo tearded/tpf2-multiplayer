@@ -21,7 +21,7 @@ GROUPS = {
     'lobby': 'relay_selftest resync_load_keeps_lobby_test hotjoin_stage_test late_loader_test lobby_mode_test test_lobby_limits test_player_stats',
     'logic': '''release_runner_test luacheck resync_test navigation_test test_sync_operation test_sync_snapshot
         test_sync_runtime test_sync_readiness test_desync_report_reload vehicle_keys_save_test
-        clone_buy_test action_sounds_test vehicle_line_choice_test depot_buy_test params_line_test fences_compat_test
+        clone_buy_test action_sounds_test vehicle_line_choice_test depot_buy_test params_line_test fences_compat_test vehicle_name_sync_test
         ser_depth_test crossing_replay_test bridge_companion_test edge_demolition_test track_fresh_test
         delay_hold_test preview_test preview_perf_test speed_vote_test hash_cadence_test hash_bigmap_test
         version_gate_test mod_download_test lobby_panel_test chat_directory_test vpos_cap_test''',

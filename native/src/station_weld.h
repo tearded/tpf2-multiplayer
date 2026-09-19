@@ -26,14 +26,22 @@ static bool MergeStationEndpoint(uint64_t p)
     auto si = [&](int i,int off) { int v; memcpy(&v,(void*)(sb+i*120+off),4); return v; };
     auto node = [&](int id) { for(int i=0;i<n;i++) if(ni(i)==id) return i; return -1; };
     auto xyz = [&](int i,float* v) { memcpy(v,(void*)(nb+i*24),12); };
+    // Template segments are the records the template APPENDED (index >=
+    // segmentsBefore, CE+0x780), the same rule as MergeTemplateStreet since
+    // 2026-09-19: a station stub carries owned=0 and a split player road's
+    // halves carry owned=1, so the owned flag misclassified both. The flag
+    // remains the fallback for an unreadable count.
+    int before; memcpy(&before,(void*)(cb+0x780),4);
+    const bool haveBefore = before>=0 && before<=m;
+    auto tpl = [&](int s) { return haveBefore ? (s>=before) : (si(s,0x74)==1); };
     std::vector<int> degree(n,0); std::vector<uint8_t> owned(n,0);
-    for(int s=0;s<m;s++) if(si(s,0x74)==1) {
+    for(int s=0;s<m;s++) if(tpl(s)) {
         for(int off=8;off<=12;off+=4) { int i=node(si(s,off)); if(i>=0) {degree[i]++;owned[i]=true;} }
     }
     int o=-1,a=-1,x=-1,t=-1,u=-1;
     // Require a unique exact inner-node match and a dangling template endpoint
     // pointing the same way as the captured connector. Never pick an interior edge.
-    for(int s=0;s<m;s++) if(si(s,0x74)==0) {
+    for(int s=0;s<m;s++) if(!tpl(s)) {
         int v0=si(s,8),v1=si(s,12);
         if((v0<0)==(v1<0)) continue;
         int xi=node(v0<0?v0:v1); if(xi<0 || owned[xi]) continue;
@@ -43,37 +51,40 @@ static bool MergeStationEndpoint(uint64_t p)
         for(int ti=0;ti<n;ti++) if(owned[ti]) {
             float tp[3]; xyz(ti,tp); float d=0; for(int k=0;k<3;k++) d+=(xp[k]-tp[k])*(xp[k]-tp[k]);
             if(d>0.0625f) continue;
-            for(int j=0;j<m;j++) if(si(j,0x74)==1 && si(j,4)==si(s,4)) {
+            // same edge kind (+0x48: 0 street, 1 track); +0x04 is padding
+            for(int j=0;j<m;j++) if(tpl(j) && si(j,0x48)==si(s,0x48)) {
                 int j0=si(j,8),j1=si(j,12),ui=-1;
                 if(j0==ni(ti)) ui=node(j1); else if(j1==ni(ti)) ui=node(j0);
                 if(ui<0 || degree[ui]!=1) continue;
                 float up[3]; xyz(ui,up); float dot=0,dd=0,ll=0;
                 for(int k=0;k<3;k++) {float v=up[k]-tp[k];dot+=v*dir[k];dd+=dir[k]*dir[k];ll+=v*v;}
                 if(dot<=0 || dot*dot<0.99f*dd*ll || dd<1e-6f || ll<1e-6f) continue;
-                if(o>=0) return false;
+                if(o>=0) { Log("[station-weld] two candidate connectors -- refusing\n"); return false; }
                 o=s;a=j;x=xi;t=ti;u=ui;
             }
         }
     }
     if(o<0) return false;
-    int before; memcpy(&before,(void*)(cb+0x780),4);
-    if(before<0 || before>m || o>=before || a<before) return false;
+    if(!haveBefore || o>=before || a<before) {
+        Log("[station-weld] segmentsBefore=%d does not separate connector %d from station segment %d -- refusing\n", before, o, a);
+        return false;
+    }
     // The non-empty construction-edge set has a different container layout.
     // Refuse that shape until its index update is implemented.
-    if(q(p+0x198)!=0) return false;
+    if(q(p+0x198)!=0) { Log("[station-weld] construction-edge set not empty -- refusing\n"); return false; }
     uint64_t fb[2]={q(p+0x170),q(cb+0x768)}, fe[2]={q(p+0x178),q(cb+0x770)};
     for(int k=0;k<2;k++) {
         // any number of frozen indices (the old 256-byte cap allowed 64); the
         // span bound is the misread guard, every index is checked against n below
         if(fe[k]<fb[k] || (fe[k]-fb[k])%4 || fe[k]-fb[k]>STATION_WELD_SANITY_BYTES ||
             (fe[k]>fb[k] && !Readable((void*)fb[k],(size_t)(fe[k]-fb[k])))) return false;
-        for(uint64_t v=fb[k];v<fe[k];v+=4) {int i;memcpy(&i,(void*)v,4);if(i<0||i>=n||i==u)return false;}
+        for(uint64_t v=fb[k];v<fe[k];v+=4) {int i;memcpy(&i,(void*)v,4);if(i<0||i>=n||i==u){Log("[station-weld] frozen list %d references index %d (outer=%d, n=%d) -- refusing\n",k,i,u,n);return false;}}
     }
-    if(fb[0]<fe[1] && fb[1]<fe[0] && (fb[0]!=fb[1] || fe[0]!=fe[1]))return false;
+    if(fb[0]<fe[1] && fb[1]<fe[0] && (fb[0]!=fb[1] || fe[0]!=fe[1])){Log("[station-weld] frozen lists overlap oddly -- refusing\n");return false;}
     uint64_t tb=q(p+0x1c8),te=q(p+0x1d0);
-    if(te<tb || (te!=tb && (te-tb!=(uint64_t)m*32 || !Readable((void*)tb,m*32))))return false;
+    if(te<tb || (te!=tb && (te-tb!=(uint64_t)m*32 || !Readable((void*)tb,m*32)))){Log("[station-weld] tag vector span %llu != %d*32 -- refusing\n",(unsigned long long)(te-tb),m);return false;}
     // A removed script connector must own no heap-backed object vector.
-    if(q(sb+o*120+0x30)!=q(sb+o*120+0x38))return false;
+    if(q(sb+o*120+0x30)!=q(sb+o*120+0x38)){Log("[station-weld] connector carries edge objects -- refusing\n");return false;}
     std::vector<int> remap(n); int count=0;
     for(int i=0;i<n;i++) remap[i]=(i==x||i==u)?-1:count++;
     remap[x]=remap[t];

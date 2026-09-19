@@ -160,6 +160,14 @@ straight tangents, sets the node flags to 0x7f00 and drops the template's outer 
 (the last record). Split halves must be the original edge's record with new endpoints
 and tangents, carrying the road's street type rather than the construction's.
 
+Template pieces are told apart from the shipped ones by INDEX: every segment at
+index >= `segmentsBefore` (CE +0x780) was appended by the template, and its placeholder
+endpoints are the template's nodes. The owned flag (+0x74) is not a discriminator
+(measured 2026-09-19): a station's street stub carries owned=0, and the halves of a
+split PLAYER road carry owned=1, so a flag-based split saw "no template" for stations
+and "no nodes of ours" on player roads, and the raw stub was built beside the split
+node. Only a loose template end (one template segment) is ever re-pointed.
+
 ## What a script proposal must carry
 
 All MEASURED:

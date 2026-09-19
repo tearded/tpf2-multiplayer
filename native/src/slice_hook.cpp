@@ -2934,22 +2934,44 @@ static bool MergeTemplateStreet(uint64_t r8)
     uint8_t* S = (uint8_t*)sb;
     auto nodeId  = [&](int i) { int32_t v; memcpy(&v, N + i * 24 + 0x14, 4); return v; };
 
-    // Template nodes = the placeholder endpoints of construction-OWNED segments
-    // (+0x74 == 1). Node FLAGS are not a discriminator: for a TRACK template the
-    // conversion stamps 0x7f00 on OUR node as well (rail depot dump 2026-08-30:
-    // our -1 at index 0 already 0x7f00), so "first 0x7f00 node" saw no nodes of
-    // ours and every rail depot replayed with the raw apron beside ours.
-    std::vector<uint8_t> isT(n, 0); int nT = 0;
-    for (int s = 0; s < m; s++) {
+    // Template segments = the records the template APPENDED: index >= the
+    // construction's segmentsBefore (CE+0x780, the segment count before the
+    // template ran). The owned flag (+0x74 == 1) used to be the discriminator
+    // and misclassified both ways (2026-09-19 session, 1 of 8 station/depot
+    // placements welded): a station's street stub carries owned=0, so nothing
+    // was a template ("template=0 ours=3") and the raw stub was built beside the
+    // shipped split node; and the halves of a split PLAYER road inherit owned=1,
+    // so our own split node passed as a template node ("template=3 ours=0").
+    // Both left the split orphaned ("HEAL ... rejoined: false 'Kollision'") or
+    // the build refused ("duplicate base nodes"). The flag is only the fallback
+    // when the proposal carries more than one construction or the CE is unreadable.
+    int32_t segBefore = -1;
+    bool haveSB = false;
+    if (ce - cb == 0x8e0 && Readable((void*)(cb + 0x780), 4)) {
+        memcpy(&segBefore, (void*)(cb + 0x780), 4);
+        haveSB = segBefore >= 0 && segBefore <= m;
+    }
+    auto isTplSeg = [&](int s) {
+        if (haveSB) return s >= segBefore;
         uint32_t owned; memcpy(&owned, S + s * 120 + 0x74, 4);
-        if (owned != 1) continue;
+        return owned == 1;
+    };
+    // Node FLAGS are not a discriminator: for a TRACK template the conversion
+    // stamps 0x7f00 on OUR node as well (rail depot dump 2026-08-30).
+    std::vector<uint8_t> isT(n, 0); std::vector<int> tplDeg(n, 0); int nT = 0;
+    for (int s = 0; s < m; s++) {
+        if (!isTplSeg(s)) continue;
         int32_t a, b; memcpy(&a, S + s * 120 + 0x08, 4); memcpy(&b, S + s * 120 + 0x0c, 4);
-        for (int i = 0; i < n; i++)
-            if (!isT[i] && (nodeId(i) == a || nodeId(i) == b) && nodeId(i) < 0) { isT[i] = true; nT++; }
+        for (int i = 0; i < n; i++) {
+            if (nodeId(i) != a && nodeId(i) != b) continue;
+            if (nodeId(i) < 0 && !isT[i]) { isT[i] = true; nT++; }
+            tplDeg[i]++;
+        }
     }
     int oursN = n - nT;
     if (nT == 0 || oursN == 0) {
-        Log("[merge] nodes=%d segs=%d template=%d ours=%d -- nothing to merge\n", n, m, nT, oursN);
+        Log("[merge] nodes=%d segs=%d template=%d ours=%d segmentsBefore=%d -- nothing to merge\n",
+            n, m, nT, oursN, haveSB ? segBefore : -1);
         return false;
     }
     // Template outer = the template node nearest to any of ours. Tolerance 15 m,
@@ -2959,18 +2981,22 @@ static bool MergeTemplateStreet(uint64_t r8)
     // apron stayed put and the depot's driveway never met the road (2026-08-30, two
     // depots visibly unconnected). The template offers only its inner and outer node,
     // metres apart, so a wider radius still picks the same one.
+    // Only a LOOSE template end qualifies (exactly one template segment touches
+    // it): the outer end of a stub, or the inner end of a bare depot apron. A
+    // big station's interior nodes are template nodes too, and re-pointing
+    // every segment of one of those onto the road would wreck the station.
     int X = -1, Tout = -1; float bestD = 225.0f;
     for (int o = 0; o < n; o++) {
         if (isT[o]) continue;
         float ox, oy; memcpy(&ox, N + o * 24, 4); memcpy(&oy, N + o * 24 + 4, 4);
         for (int t = 0; t < n; t++) {
-            if (!isT[t]) continue;
+            if (!isT[t] || tplDeg[t] != 1) continue;
             float tx, ty; memcpy(&tx, N + t * 24, 4); memcpy(&ty, N + t * 24 + 4, 4);
             float d = (ox - tx) * (ox - tx) + (oy - ty) * (oy - ty);
             if (d < bestD) { bestD = d; X = o; Tout = t; }
         }
     }
-    if (X < 0) { Log("[merge] no template node within 15 m of ours -- untouched\n"); return false; }
+    if (X < 0) { Log("[merge] no loose template node within 15 m of ours (template=%d ours=%d) -- untouched\n", nT, oursN); return false; }
 
     // ENDPOINT WELD (2026-08-29, road depot at a junction). When the UI snapped
     // the apron's outer node onto an EXISTING node J (t in {0,1}: no split, no
@@ -2994,9 +3020,10 @@ static bool MergeTemplateStreet(uint64_t r8)
             int32_t s0, s1; uint32_t owned;
             memcpy(&s0, S + s * 120 + 0x08, 4); memcpy(&s1, S + s * 120 + 0x0c, 4);
             memcpy(&owned, S + s * 120 + 0x74, 4);
-            bool isApron = owned == 1 && ((s0 == inId && s1 == outId) || (s0 == outId && s1 == inId));
+            (void)owned;
+            bool isApron = isTplSeg(s) && ((s0 == inId && s1 == outId) || (s0 == outId && s1 == inId));
             if (isApron) { a = (a < 0) ? s : -2; continue; }
-            if (owned == 0 && ((s0 == xid && s1 >= 0) || (s1 == xid && s0 >= 0))) {
+            if (!isTplSeg(s) && ((s0 == xid && s1 >= 0) || (s1 == xid && s0 >= 0))) {
                 if (o < 0) { o = s; J = (s0 == xid) ? s1 : s0; } else o = -2;
             }
         }
@@ -3052,13 +3079,38 @@ static bool MergeTemplateStreet(uint64_t r8)
         Log("[merge] template outer node is index %d, not last (%d) -- refusing (index shift)\n", Tout, n - 1);
         return false;
     }
-    // the frozen-index list must not reference the node we drop
-    if (IsHeapPtr(fb) && fe > fb && Readable((void*)fb, (size_t)(fe - fb))) {
-        int nf = (int)((fe - fb) / 4);
-        for (int i = 0; i < nf; i++) {
-            int32_t v; memcpy(&v, (void*)(fb + 4 * i), 4);
-            Log("[merge] frozen node index[%d] = %d\n", i, v);
-            if (v == Tout) { Log("[merge] frozen list references the outer node -- refusing\n"); return false; }
+    // The frozen-index lists (Proposal+0x170 and CE+0x768) must not keep
+    // referencing the node we drop. A depot's list names only the inner node
+    // (measured); a template that freezes its outer end keeps that node when
+    // the UI welds it onto the road, so ours takes its place in the list.
+    // The other index-based set (+0x188, construction edge indices, size at
+    // +0x198) is segment-based and unaffected by dropping the last node.
+    {
+        uint64_t lb[2] = { fb, 0 }, le[2] = { fe, 0 };
+        if (Readable((void*)(cb + 0x768), 0x10)) { memcpy(&lb[1], (void*)(cb + 0x768), 8); memcpy(&le[1], (void*)(cb + 0x770), 8); }
+        for (int k = 0; k < 2; k++) {
+            if (!(IsHeapPtr(lb[k]) && le[k] > lb[k])) continue;
+            if ((le[k] - lb[k]) % 4 || le[k] - lb[k] > PROPOSAL_SANITY_BYTES || !Readable((void*)lb[k], (size_t)(le[k] - lb[k]))) {
+                Log("[merge] frozen list %d unreadable or odd (%llu B) -- refusing\n", k, (unsigned long long)(le[k] - lb[k]));
+                return false;
+            }
+            int nf = (int)((le[k] - lb[k]) / 4);
+            for (int i = 0; i < nf; i++) {
+                int32_t v; memcpy(&v, (void*)(lb[k] + 4 * i), 4);
+                if (v < 0 || v >= n) { Log("[merge] frozen list %d index[%d] = %d out of range -- refusing\n", k, i, v); return false; }
+            }
+        }
+        for (int k = 0; k < 2; k++) {
+            if (!(IsHeapPtr(lb[k]) && le[k] > lb[k])) continue;
+            if (k == 1 && lb[1] == lb[0]) continue;      // the same vector reached twice
+            int nf = (int)((le[k] - lb[k]) / 4);
+            for (int i = 0; i < nf; i++) {
+                int32_t v; memcpy(&v, (void*)(lb[k] + 4 * i), 4);
+                if (v == Tout) {
+                    int32_t xi = X; memcpy((void*)(lb[k] + 4 * i), &xi, 4);
+                    Log("[merge] frozen list %d index[%d] = outer node %d -> ours %d\n", k, i, Tout, X);
+                }
+            }
         }
     }
     int32_t xid = nodeId(X), tid = nodeId(Tout);
@@ -3093,8 +3145,7 @@ static bool MergeTemplateStreet(uint64_t r8)
         for (int s = 0; s < m; s++) {
             int32_t a, b; memcpy(&a, S + s * 120 + 0x08, 4); memcpy(&b, S + s * 120 + 0x0c, 4);
             if (a != xid && b != xid) continue;
-            uint32_t owned; memcpy(&owned, S + s * 120 + 0x74, 4);
-            if (owned == 1) continue;                      // the template connector
+            if (isTplSeg(s)) continue;                     // the template connector
             // A UI half is the ORIGINAL edge's record with new endpoints and
             // tangents: street type, +0x2c, +0x4c and the other non-geometry
             // fields come from the edge being split, NOT the construction.
@@ -3114,8 +3165,8 @@ static bool MergeTemplateStreet(uint64_t r8)
     // drop the template's outer node: last record, so nothing shifts
     uint64_t newNe = nb + (uint64_t)(n - 1) * 24;
     memcpy((void*)(r8 + 0x08), &newNe, 8);
-    Log("[merge] done: X=%d takes over outer node %d (d=%.2f m); nodes %d->%d, segs %d (unchanged)\n",
-        xid, tid, sqrtf(bestD), n, n - 1, m);
+    Log("[merge] done: X=%d takes over outer node %d (d=%.2f m, segmentsBefore=%d); nodes %d->%d, segs %d (unchanged)\n",
+        xid, tid, sqrtf(bestD), haveSB ? segBefore : -1, n, n - 1, m);
     return true;
 }
 

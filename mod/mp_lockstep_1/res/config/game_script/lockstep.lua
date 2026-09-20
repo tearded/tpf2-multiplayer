@@ -537,7 +537,7 @@ K.JOURNAL_LOAN = 0
 -- a 30,000,000 loan is several ticks of settling.
 K.LOAN_SETTLE_TICKS = 90
 K.JOURNAL_TRANSFER = 6
-K.STRICT_OPS = { VREV = true, VSTOP = true, VLINE = true, VSELL = true, VDEPOT = true, VREPL = true, VBUY = true, LCREATE = true, LUPDATE = true, LDELETE = true }   -- replay on the originator too, but only when ARMED=1 (the slice cancelled it)
+K.STRICT_OPS = { VREV = true, VSTOP = true, VLINE = true, VSELL = true, VDEPOT = true, VREPL = true, VBUY = true, LCREATE = true, LUPDATE = true, LDELETE = true, LSPARE = true }   -- replay on the originator too, but only when ARMED=1 (the slice cancelled it)
 -- CONX/CONP have no slice cancel (the construction's module params cannot be
 -- read from the proposal); the originator instead deletes its native copy and
 -- replays, gated by c.cancelled rather than ARMED. See execConX.
@@ -659,7 +659,7 @@ local function execute(c)
 	elseif c.op == "STOPADD" or c.op == "STOPDEL" or c.op == "STOPREP" then CM.stopEnqueue(c)
 	elseif c.op == "VNAME" then CM.execSetName(c)
 	elseif c.op == "VCOLOR" then CM.execSetColor(c)
-	elseif c.op == "LCREATE" or c.op == "LUPDATE" or c.op == "LDELETE" then
+	elseif c.op == "LCREATE" or c.op == "LUPDATE" or c.op == "LDELETE" or c.op == "LSPARE" then
 		-- behind any stop / construction replay still in flight: a line update
 		-- that re-adds a replaced stop must find that stop already there
 		if CM.conxBusy or #CM.conxQueue > 0 then
@@ -970,6 +970,7 @@ function data()
 			CM.drainVehCap()
 			CM.primeLineKeys()
 			CM.pollLineKeys()
+			if CM.spareTick then CM.spareTick() end   -- the pre-made "New line" (lines.lua)
 			if not CM.conxBusy and #CM.conxQueue > 0 then
 				local nowG = CM.gameTime() or 0
 				local head = CM.conxQueue[1]
@@ -1353,13 +1354,93 @@ function data()
 		end,
 		guiUpdate = function()
 			guiTick = guiTick + 1
-			if CM.actionSoundsGuiTick then pcall(CM.actionSoundsGuiTick, CM.recoveryGuiHeld()) end
-			-- other players' cursors (cursors.lua): every frame, so the circles glide; ahead of
-			-- the panel's own twice-a-second refresh
-			if CM.cursorGuiTick then pcall(CM.cursorGuiTick) end
-			pcall(CM.navigationGuiTick)
-			if not CM.recoveryGuiHeld() then pcall(CM.previewGuiTick) end
-			if guiTick % 30 ~= 0 then return end
+			-- A DEDICATED SERVER HAS NO SCREEN (2026-09-18): the other players' cursor
+			-- circles, the construction previews and the dashboard are drawn for a player
+			-- who is not there, every frame, on the thread that hands the sim its batches.
+			-- With one joiner in, the server's batch interval crept from 200 to 300 ms at
+			-- lever 1 while its own game-script update stayed under 8 ms. Read once, a
+			-- moment after the world is up; then: no per-frame work, the dashboard every
+			-- 300 ticks (the chat and the players' requests still arrive through it).
+			if CM.dedicatedGui == nil and guiTick >= 30 then
+				CM.dedicatedGui = false
+				local f = io.open(K.BASE .. "mp_dedicated.txt", "r")
+				if f then
+					local body = f:read("*a") or ""
+					f:close()
+					CM.dedicatedGui = body:find("dedicated=1", 1, true) ~= nil
+					if CM.dedicatedGui then print("[ls-gui] dedicated server: no cursors, previews or per-frame panel work") end
+				end
+			end
+			if CM.dedicatedGui then
+				if guiTick % 300 ~= 0 then return end
+			else
+				-- THE SPARE LINE'S EDITOR, FROM THIS THREAD (lines.lua CM.spareFireWrite,
+				-- 2026-09-19). A New line click opens the editor on a pre-made line the
+				-- game script re-owns to the player on its next tick. The editor's
+				-- callback must run on the UI thread, and its result must name a line
+				-- the player owns: once this state (the UI's own copy of the engine)
+				-- sees the spare as ours, lockstep_lfire.txt tells the slice to fire
+				-- the held callback from the next CommandList::Add on this thread --
+				-- and this rename IS that Add, sent every third frame until the slice
+				-- blanks the file, or four seconds pass.
+				if guiTick % 3 == 0 then
+					pcall(function()
+						local f = io.open(K.BASE .. "lockstep_lfire_req.txt", "r")
+						if not f then return end
+						local body = f:read("*a") or ""
+						f:close()
+						local lid, nameEsc = body:match("^(%d+)%s*(%S*)")
+						lid = tonumber(lid)
+						if not lid then CM.guiFireSince = nil; return end
+						local nowC = os.clock()
+						if not CM.guiFireSince or CM.guiFireLid ~= lid then CM.guiFireSince, CM.guiFireLid, CM.guiFireOwned = nowC, lid, nil end
+						local function blank(name)
+							local w = io.open(K.BASE .. name, "w")
+							if w then w:close() end
+						end
+						if nowC - CM.guiFireSince > 4 then
+							blank("lockstep_lfire_req.txt"); blank("lockstep_lfire.txt")
+							print(string.format("[ls-gui] spare line %d: the slice never opened the editor on it -- giving up", lid))
+							CM.guiFireSince = nil
+							return
+						end
+						if not CM.guiFireOwned then
+							local mine = false
+							pcall(function()
+								local po = api.engine.getComponent(lid, api.type.ComponentType.PLAYER_OWNED)
+								mine = po and po.player == api.engine.util.getPlayer()
+							end)
+							if not mine then return end
+							CM.guiFireOwned = guiTick
+							return   -- one more frame for the UI's tables to follow the ownership
+						end
+						local g = io.open(K.BASE .. "lockstep_lfire.txt", "r")
+						local go = g and (g:read("*a") or "") or ""
+						if g then g:close() end
+						if go == "" and CM.guiFireGone then
+							-- the slice blanked it: fired (or gave up); done
+							blank("lockstep_lfire_req.txt")
+							CM.guiFireSince, CM.guiFireGone = nil, nil
+							return
+						end
+						if go == "" then
+							local w = io.open(K.BASE .. "lockstep_lfire.txt", "w")
+							if w then w:write(tostring(lid)); w:close() end
+							CM.guiFireGone = true
+						end
+						local name = (tostring(nameEsc or ""):gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end))
+						if name == "" then name = "Line" end
+						api.cmd.sendCommand(api.cmd.make.setName(lid, name), function() end)
+					end)
+				end
+				if CM.actionSoundsGuiTick then pcall(CM.actionSoundsGuiTick, CM.recoveryGuiHeld()) end
+				-- other players' cursors (cursors.lua): every frame, so the circles glide; ahead of
+				-- the panel's own twice-a-second refresh
+				if CM.cursorGuiTick then pcall(CM.cursorGuiTick) end
+				pcall(CM.navigationGuiTick)
+				if not CM.recoveryGuiHeld() then pcall(CM.previewGuiTick) end
+				if guiTick % 30 ~= 0 then return end
+			end
 			pcall(function()
 				-- NATIVE WIDGETS. The GUI Lua state has the game's own widget set
 				-- (Window, Table, TextView, BoxLayout), so the dashboard is built

@@ -58,17 +58,19 @@ function CM.syncLobbyAlive()
 	return CM.syncLobbyAliveCached
 end
 
--- ALONE, for a hold: the lobby that drives the operation is gone, or its
--- roster is KNOWN to be one player. Never "no peer heard": right after the
--- load every member is deaf for a while (fresh Lua state, peers still loading),
--- and the first frozen join with three players abandoned its hold on every
--- machine 15 s after the load for exactly that reason (2026-09-17 21:51):
--- each unpaused itself, the pause fence could not drain, no fingerprint was
--- taken and the round timed out in "checking".
+-- ALONE, for a hold: the lobby's roster is KNOWN to be one player. Nothing
+-- else. Not "no peer heard": right after the load every member is deaf for a
+-- while (fresh Lua state, peers still loading), and the first frozen join
+-- with three players abandoned its hold on every machine 15 s after the load
+-- for exactly that reason (2026-09-17 21:51). Not "the lobby's heartbeat is
+-- stale" either: tpf2_sync_available.txt is refreshed only while a resync CAN
+-- be started, not during one, so a joiner in the dedicated server's frozen
+-- join read the lobby as gone 15 s after its reload and abandoned the hold
+-- (2026-09-18 16:38) -- the round timed out in "checking" with no fingerprint.
+-- A control file left by another process is already refused by its pid.
 function CM.syncAlone()
 	local roster = tonumber(CM.rosterPlayers)
-	if roster ~= nil and roster <= 1 then return true end
-	return not CM.syncLobbyAlive()
+	return roster ~= nil and roster <= 1
 end
 
 function CM.autoSyncPump(now)
@@ -85,6 +87,11 @@ function CM.autoSyncPump(now)
 			CM.autoSync = incoming
 			if not old or old.operation ~= incoming.operation then
 				local speed; pcall(function() speed = game.interface.getGameSpeed() end)
+				-- a dedicated server pauses itself while empty (pacing.lua): the
+				-- speed to resume at is the players' vote, else the one it paused
+				-- from, never that 0 (CM.dedicatedResumeSpeed)
+				if CM.dedicatedPauseEmpty then CM.dedicatedPauseEmpty() end   -- refreshes CM.dedicated
+				if CM.dedicated then CM.dedPaused = false; speed = CM.dedicatedResumeSpeed(speed) end
 				CM.autoResumeSpeed = speed or CM.baseSpeed or 0
 				CM.setSpeed(0, "automatic world operation")
 			end
@@ -97,6 +104,7 @@ function CM.autoSyncPump(now)
 		if not CM.autoReleased or CM.autoReleased ~= state.epoch then
 			local speed = tonumber(state.resume_speed)
 			if speed ~= 0 and speed ~= 1 and speed ~= 2 and speed ~= 3 and speed ~= 4 then return true end
+			if CM.dedicated and CM.dedicatedResumeSpeed then speed = CM.dedicatedResumeSpeed(speed) end
 			CM.autoReleased = state.epoch
 			CM.recoveryReleasePacing(speed)
 			CM.lgHolding, CM.resyncHold = false, false

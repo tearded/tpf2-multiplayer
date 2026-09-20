@@ -264,6 +264,44 @@ static CreatePageFn g_origCreatePage = nullptr;
 // resolves them, then draw a clear-attachment button rect each frame.
 static PFN_vkGetDeviceProcAddr g_origGdpa    = nullptr;
 static PFN_vkQueuePresentKHR   g_realPresent = nullptr;
+// NO RENDERING (2026-09-18, user: "can we disable the renderer"): a dedicated
+// server has no GPU; its Vulkan is lavapipe, which rasterizes on the CPU at
+// vkQueueSubmit -- six llvmpipe threads at 180% for a town nobody looks at, and
+// the sim, which advances per frame, crawled. With dedicated_render=0 (the
+// default in dedicated mode) every submit goes through EMPTY: the same fences
+// and semaphores are signalled, no command buffer runs; query results read as
+// zero so nothing waits on a query that never executed; the panel is not drawn.
+// The engine's frame loop, the swapchain and the present are untouched.
+static PFN_vkQueueSubmit        g_origSubmit  = nullptr;
+static PFN_vkGetQueryPoolResults g_origQueryResults = nullptr;
+// ... and NO WINDOW SYSTEM either (same evening): with the command buffers gone
+// the server still presented through lavapipe's X11 swapchain at 30 frames a
+// second, and the engine steps the simulation per frame as if there were 60 --
+// the world ran at exactly half of every speed asked (0.45 units/s at 1x, 0.9 at
+// 2x; a PC does 0.9 at 1x). With dedicated_render=0 the swapchain is never
+// acquired from or presented to: acquire hands out image indices in turn and
+// signals the semaphore/fence through an empty submit, present consumes its
+// wait semaphores the same way and returns, and the frame loop is paced here to
+// NORENDER_FPS instead of by the X server.
+static PFN_vkAcquireNextImageKHR g_origAcquire = nullptr;
+static PFN_vkAcquireNextImage2KHR g_origAcquire2 = nullptr;
+static PFN_vkGetSwapchainImagesKHR g_origGetScImages = nullptr;
+static volatile LONG g_noWsi = 0;            // dedicated_nowsi=1 (opt-in, needs render=0): acquire/present answered here -- crashed the engine on the VPS 2026-09-18 22:42, under study
+static volatile LONG g_nullScCount = 0;      // images in the current swapchain (for the round robin)
+static volatile LONG g_nullScNext = 0;
+static const double NORENDER_FPS = 60.0;     // the frame rate the engine's per-frame stepping assumes (the DLL-answered present)
+// dedicated_fps=<n> (default 30): with render=0 and the window system still in
+// place, the present is paced here to this many frames a second. The engine
+// needs only 5 batches a second; every headless frame beyond that is scene
+// prep for nobody on the thread that hands the sim its batches (2026-09-18).
+static int g_flagDedFps = 30;
+static int g_flagDedPinBatch = 1;             // dedicated_pin_batch=0|1: 1 (default) pins the engine's batch interval at 200 ms (tpf2_bridge_mp.dll speedhook)
+static void NullSignal(VkQueue q, VkSemaphore signalSem, VkFence fence, uint32_t waitCount, const VkSemaphore* waitSems);
+static void NullPace(double fps);
+static volatile LONG g_noRender = 0;
+static volatile LONG g_noRenderSubmits = 0, g_noRenderCmdBufs = 0;
+static bool NoRender() { return InterlockedCompareExchange(&g_noRender, 0, 0) != 0; }
+static bool NoWsi() { return InterlockedCompareExchange(&g_noWsi, 0, 0) != 0; }
 static PFN_vkGetDeviceQueue    g_origGetQueue = nullptr;
 static PFN_vkCreateSwapchainKHR g_origCreateSc = nullptr;
 static VkDevice   g_dev   = VK_NULL_HANDLE;
@@ -365,6 +403,7 @@ static volatile LONG g_leaveOnMenu = 0;
 static HWND g_gameWnd = nullptr;
 static BOOL CALLBACK FindGameWnd(HWND h, LPARAM lp);
 static void StartLobby(int join);     // host=0 / join=1 -> spawns lobby.py
+static void DedicatedTick();          // dedicated server mode (tpf2_menu_flags.txt dedicated=1): host, load, keep up
 static void LeaveLobby();
 static DWORD WINAPI KbHookThread(LPVOID);
 static bool LobbySend(const char* jsonLine);
@@ -395,6 +434,10 @@ static volatile LONG g_saveReady  = 0;
 //  g_worldGenHold     -- absorb the next change: it is a load WE caused
 //  g_switchShare      -- the save SyncPoll is about to share is a world switch
 static volatile LONG g_selfLoad = 0, g_hostLoadedItself = 0, g_lastPage = -1;
+//  g_hostMenuLoad -- the host's own mid-session LOAD GAME is in flight (a world
+//  switch it shared); the title page the engine builds on the way is not a
+//  "left the world" (consumed by MyCreatePage, one shot).
+static volatile LONG g_hostMenuLoad = 0;
 static volatile LONG g_sessionStarted = 0;
 static volatile LONG g_worldGenHold = 0, g_switchShare = 0;
 static char g_worldGen[160] = "";
@@ -488,6 +531,13 @@ static bool InitRender(VkSwapchainKHR sc)
 // ---- multiplayer panel state ----
 static volatile LONG g_recoveryPresent = 0;
 static volatile LONG g_recoveryWorldIo = 0;
+// THE PANEL STAYS UP WHILE A WORLD LOADS (2026-09-18, user): with a lobby running,
+// the loading screen (CreatePage 16) keeps the lobby view -- the roster with what
+// every player is doing (receiving the save N%, loading world N%, catching up).
+// It is drawn even during a native save/load (the frozen join is one) but takes
+// no clicks then; when the world is up it hands over to the in-game panel, open,
+// so the catch-up is visible too, until the player closes it.
+static volatile LONG g_loadingPanel = 0;
 static ULONGLONG g_recoveryRequestedAt = 0; // guarded by g_modelCs
 static char g_recoveryOperation[40] = "", g_recoveryEpoch[40] = "";
 static char g_recoveryPhase[24] = "", g_recoveryDetail[420] = "", g_recoveryFailedStep[24] = "";
@@ -636,6 +686,24 @@ static int   g_flagSlot = 0;
 static char  g_flagMaster[256] = "https://srv1306562.hstgr.cloud/tpf2mp";   // master server base URL ("" disables the browser)
 static int   g_flagRelayAutosaveMin = 2;    // relay lobbies: the leader uploads a fresh save this often (0 = never)
 static int   g_flagAutoLoad = 1;            // START loads the shared save in-process (autoload=0: the player opens LOAD GAME)
+// DEDICATED SERVER (2026-09-18): a game that hosts by itself. With dedicated=1 the
+// title menu hosts a lobby the moment it is up, loads dedicated_save (else the
+// newest save), keeps the game's own autosave going, and hosts + loads again
+// after a crash to the title menu. The world pauses while nobody else is in
+// (dedicated_pause_empty=1, mp/pacing.lua) and joiners come in through the
+// frozen-join round like on any host. DedicatedTick, once a second from myPresent.
+static int   g_flagDedicated = 0;
+static char  g_flagDedSave[64] = "";        // dedicated_save=<name without .sav>; empty = the newest save in the save folder
+static char  g_flagDedLobby[64] = "";       // dedicated_lobby=<lobby name shown in the public list>
+static char  g_flagDedName[32] = "";        // dedicated_name=<the server's player name>
+static char  g_flagDedPassword[40] = "";    // dedicated_password=<lobby password>; empty = open
+static int   g_flagDedPublic = 1;           // dedicated_public=0|1: listed on the master server
+static int   g_flagDedCompanies = 0;        // dedicated_companies=0|1: SEPARATE COMPANIES (a company per player)
+static int   g_flagDedAutosaveMin = 10;     // dedicated_autosave_min=<n>, 0-600: the game's own autosave this often (0 = never)
+static int   g_flagDedEmptySpeed = 1;       // dedicated_empty_speed=0..4: the world's speed while nobody else is in (0 = paused); dedicated_pause_empty=1 is 0
+static int   g_flagDedPort = 0;             // dedicated_port=<udp/tcp port> for the lobby (0 = the default 29471); a box that also runs the relay needs another
+static int   g_flagDedRender = 0;           // dedicated_render=0|1: 0 (default) submits no command buffers -- a software renderer then costs nothing; 1 draws (screenshots)
+static int   g_flagDedNoWsi = 0;            // dedicated_nowsi=0|1: 1 also answers acquire/present in the DLL, paced to 60 frames/s (opt-in: it crashed the engine on the VPS)
 static volatile LONG g_storedAge = -1, g_storedMax = -1;   // relay roster: age of the relay's stored world / how fresh counts as fresh
 static volatile LONG g_joinFreeze = 0;   // roster join_freeze: the lobby brings a late joiner in through a world sync (everyone reloads); this DLL takes no hot-join save (2026-09-16)
 static bool  g_latoLoaded = false;
@@ -659,6 +727,44 @@ static void ReadFlags()
             if (!strcmp(v, "always")) g_flagShareMods = 1; else if (!strcmp(v, "never")) g_flagShareMods = 2; else g_flagShareMods = 0;
         } else if (!strcmp(line, "autoload")) {
             if (!strcmp(v, "0")) g_flagAutoLoad = 0; else if (!strcmp(v, "1")) g_flagAutoLoad = 1;
+        } else if (!strcmp(line, "dedicated")) {
+            if (!strcmp(v, "0")) g_flagDedicated = 0; else if (!strcmp(v, "1")) g_flagDedicated = 1;
+        } else if (!strcmp(line, "dedicated_save")) {
+            // a save NAME (it becomes <save dir>\<name>.sav): no path parts, no quotes
+            if (v[0] && strlen(v) < sizeof(g_flagDedSave) && !strpbrk(v, "\\/:*?\"<>|")) strcpy_s(g_flagDedSave, v);
+            else if (v[0]) Log("[menu] flags: dedicated_save ignored (a plain save name, under 64 characters)\n");
+        } else if (!strcmp(line, "dedicated_lobby")) {
+            if (v[0] && strlen(v) < sizeof(g_flagDedLobby) && !strpbrk(v, "\"")) strcpy_s(g_flagDedLobby, v);
+        } else if (!strcmp(line, "dedicated_name")) {
+            if (v[0] && strlen(v) < sizeof(g_flagDedName) && !strpbrk(v, "\" \t")) strcpy_s(g_flagDedName, v);
+        } else if (!strcmp(line, "dedicated_password")) {
+            // it becomes a netpunch.exe argument: no blanks or quotes
+            if (strlen(v) < sizeof(g_flagDedPassword) && !strpbrk(v, "\" \t")) strcpy_s(g_flagDedPassword, v);
+        } else if (!strcmp(line, "dedicated_public")) {
+            if (!strcmp(v, "0")) g_flagDedPublic = 0; else if (!strcmp(v, "1")) g_flagDedPublic = 1;
+        } else if (!strcmp(line, "dedicated_companies")) {
+            if (!strcmp(v, "0")) g_flagDedCompanies = 0; else if (!strcmp(v, "1")) g_flagDedCompanies = 1;
+        } else if (!strcmp(line, "dedicated_autosave_min")) {
+            int m = atoi(v);
+            if (digit && m >= 0 && m <= 600) g_flagDedAutosaveMin = m;
+        } else if (!strcmp(line, "dedicated_empty_speed")) {
+            int es = atoi(v);
+            if (digit && es >= 0 && es <= 4) g_flagDedEmptySpeed = es;
+        } else if (!strcmp(line, "dedicated_pause_empty")) {
+            // the older flag: 1 = paused while empty; 0 = the (old) "keep simulating" = 1x
+            if (!strcmp(v, "0")) g_flagDedEmptySpeed = 1; else if (!strcmp(v, "1")) g_flagDedEmptySpeed = 0;
+        } else if (!strcmp(line, "dedicated_render")) {
+            if (!strcmp(v, "0")) g_flagDedRender = 0; else if (!strcmp(v, "1")) g_flagDedRender = 1;
+        } else if (!strcmp(line, "dedicated_nowsi")) {
+            if (!strcmp(v, "0")) g_flagDedNoWsi = 0; else if (!strcmp(v, "1")) g_flagDedNoWsi = 1;
+        } else if (!strcmp(line, "dedicated_pin_batch")) {
+            if (!strcmp(v, "0")) g_flagDedPinBatch = 0; else if (!strcmp(v, "1")) g_flagDedPinBatch = 1;
+        } else if (!strcmp(line, "dedicated_fps")) {
+            int fv = atoi(v);
+            if (digit && fv >= 5 && fv <= 240) g_flagDedFps = fv;
+        } else if (!strcmp(line, "dedicated_port")) {
+            int pt = atoi(v);
+            if (digit && pt >= 1024 && pt <= 65535) g_flagDedPort = pt;
         } else if (!strcmp(line, "slot")) {
             // the title menu builds 8 entries (9 with CONTINUE): a slot past them never inserts ours
             int s = atoi(v);
@@ -672,6 +778,12 @@ static void ReadFlags()
     }
     fclose(f);
     Log("[menu] flags: slot=%d scale=%.2f autoload=%d relay_autosave_min=%d\n", g_flagSlot, g_flagScale, g_flagAutoLoad, g_flagRelayAutosaveMin);
+    if (g_flagDedicated)
+        Log("[dedicated] on: save='%s' lobby='%s' name='%s' password=%s public=%d companies=%d autosave_min=%d empty_speed=%d port=%d render=%d\n",
+            g_flagDedSave, g_flagDedLobby, g_flagDedName, g_flagDedPassword[0] ? "yes" : "no", g_flagDedPublic,
+            g_flagDedCompanies, g_flagDedAutosaveMin, g_flagDedEmptySpeed, g_flagDedPort, g_flagDedRender);
+    if (g_flagDedicated && !g_flagDedRender) InterlockedExchange(&g_noRender, 1);
+    if (g_flagDedicated && !g_flagDedRender && g_flagDedNoWsi) InterlockedExchange(&g_noWsi, 1);
 }
 // The game's own menu face: <gamedir>\res\fonts\Lato2OFL\Lato-Regular.ttf, loaded
 // process-private so GDI can select "Lato" without touching the system font table.
@@ -1002,21 +1114,41 @@ static bool httpGet(const char* url, char* out, int n)
     uc.lpszHostName = host; uc.dwHostNameLength = 256; uc.lpszUrlPath = path; uc.dwUrlPathLength = 512;
     if (!WinHttpCrackUrl(wurl, 0, 0, &uc)) return false;
     bool ok = false; out[0] = 0;
+    // 2026-09-18: a player's browser answered "no response" 99 times out of 99
+    // while his own lobby.py published to the same host over Python: the
+    // failure was silent (no error code) and the 5 s budget covered one
+    // address family. The master has an AAAA record, so a machine whose IPv6
+    // routes nowhere spent the whole budget on the v6 connect. Now: IPv6 fast
+    // fallback (the connect races both families), a longer budget, the
+    // WinHTTP error code in the note the panel shows, and one retry.
+    // WINHTTP_OPTION_IPV6_FAST_FALLBACK is 140 (Windows 10 1709+); an older
+    // WinHTTP just refuses the option.
     HINTERNET s = WinHttpOpen(L"tpf2mp-menu/1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!s) return false;
-    WinHttpSetTimeouts(s, 5000, 5000, 5000, 5000);
-    HINTERNET c = WinHttpConnect(s, host, uc.nPort, 0);
-    HINTERNET r = c ? WinHttpOpenRequest(c, L"GET", path, nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                         uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0) : nullptr;
-    if (r && WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(r, nullptr)) {
-        DWORD st = 0, sl = sizeof(st);
-        WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &st, &sl, WINHTTP_NO_HEADER_INDEX);
-        int got = 0; DWORD rd = 0;
-        while (got < n - 1 && WinHttpReadData(r, out + got, (DWORD)(n - 1 - got), &rd) && rd) got += (int)rd;
-        out[got] = 0; ok = (st == 200);
-        if (!ok) snprintf(out, n, "HTTP %lu", (unsigned long)st);
+    if (!s) { snprintf(out, n, "winhttp open error %lu", (unsigned long)GetLastError()); return false; }
+    { DWORD on = 1; WinHttpSetOption(s, 140 /* WINHTTP_OPTION_IPV6_FAST_FALLBACK */, &on, sizeof(on)); }
+    WinHttpSetTimeouts(s, 8000, 10000, 10000, 10000);   // resolve, connect, send, receive
+    DWORD err = 0; const char* stage = "";
+    for (int attempt = 0; attempt < 2 && !ok; attempt++) {
+        HINTERNET c = WinHttpConnect(s, host, uc.nPort, 0);
+        HINTERNET r = c ? WinHttpOpenRequest(c, L"GET", path, nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                             uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0) : nullptr;
+        if (!c) { err = GetLastError(); stage = "connect"; }
+        else if (!r) { err = GetLastError(); stage = "request"; }
+        else if (!WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) { err = GetLastError(); stage = "send"; }
+        else if (!WinHttpReceiveResponse(r, nullptr)) { err = GetLastError(); stage = "receive"; }
+        else {
+            DWORD st = 0, sl = sizeof(st);
+            WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &st, &sl, WINHTTP_NO_HEADER_INDEX);
+            int got = 0; DWORD rd = 0;
+            while (got < n - 1 && WinHttpReadData(r, out + got, (DWORD)(n - 1 - got), &rd) && rd) got += (int)rd;
+            out[got] = 0; ok = (st == 200);
+            if (!ok) { snprintf(out, n, "HTTP %lu", (unsigned long)st); err = 0; stage = ""; }
+        }
+        if (r) WinHttpCloseHandle(r); if (c) WinHttpCloseHandle(c);
+        if (!ok && stage[0] && attempt == 0) Log("[menu] server browser: %s failed (winhttp %lu), retrying", stage, (unsigned long)err);
     }
-    if (r) WinHttpCloseHandle(r); if (c) WinHttpCloseHandle(c); WinHttpCloseHandle(s);
+    WinHttpCloseHandle(s);
+    if (!ok && stage[0]) snprintf(out, n, "winhttp %lu at %s", (unsigned long)err, stage);   // 12002 timeout, 12007 no such host, 12029 cannot connect
     return ok;
 }
 static DWORD WINAPI PubFetchThread(LPVOID)
@@ -1397,7 +1529,7 @@ static void RenderPanelLayer(int w, int h)
                 wchar_t wn[64], wv[32], wp[32], wa[32];
                 MultiByteToWideChar(CP_UTF8, 0, r.name, -1, wn, 64); MultiByteToWideChar(CP_UTF8, 0, r.version, -1, wv, 32);
                 // a master from before the type field: the relay is known by its game string
-                const wchar_t* wt = !strcmp(r.type, "relay") ? L"dedicated server" : !strcmp(r.type, "host") ? L"player hosted"
+                const wchar_t* wt = (!strcmp(r.type, "relay") || !strcmp(r.type, "dedicated")) ? L"dedicated server" : !strcmp(r.type, "host") ? L"player hosted"
                                   : !strcmp(r.game, "dedicated relay") ? L"dedicated server" : L"player hosted";
                 if (r.locked) { wchar_t t[64]; _snwprintf_s(t, _TRUNCATE, L"%s  [locked]", wn); wcscpy_s(wn, t); }
                 _snwprintf_s(wp, _TRUNCATE, L"%d / %d", r.players, r.max);
@@ -1961,6 +2093,7 @@ static VkResult myPresent(VkQueue q, const VkPresentInfoKHR* pi)
     SteamNameTick();
     StageTick();
     PollWorldGen();
+    DedicatedTick();
     LONG n = InterlockedIncrement(&g_presentCount);
     if ((n & 63) == 0 && InterlockedCompareExchange(&g_autoLoadPending, 0, 0) && GetTickCount64() - g_autoLoadSince > 12000) {
         // no menu frame took the load (not on a screen whose update runs): say how to load it by hand
@@ -1973,17 +2106,36 @@ static VkResult myPresent(VkQueue q, const VkPresentInfoKHR* pi)
         InterlockedCompareExchange(&g_showOverlay, 0, 0), pi->swapchainCount,
         (int)g_rInit, (int)g_rFail, g_dev, g_qfam, (int)g_scFormat);
     __try {
-        if ((InterlockedCompareExchange(&g_showOverlay, 0, 0) || InterlockedCompareExchange(&g_ingameOverlay, 0, 0) || g_recoveryPresent) && !g_recoveryWorldIo && !NativeIo::Busy() && pi->swapchainCount >= 1) {
+        const bool loadingPanel = InterlockedCompareExchange(&g_loadingPanel, 0, 0) != 0;
+        if (loadingPanel && WorldLoaded()) {
+            // the world is up: the loading view hands over to the in-game panel, open
+            InterlockedExchange(&g_loadingPanel, 0);
+            InterlockedExchange(&g_showOverlay, 0);
+            InterlockedExchange(&g_ingameOverlay, 1);
+            InterlockedExchange(&g_uiState, 2);
+            InterlockedExchange(&g_panelDirty, 1);
+        }
+        const bool quiet = !g_recoveryWorldIo && !NativeIo::Busy();
+        if (!NoRender() && (InterlockedCompareExchange(&g_showOverlay, 0, 0) || InterlockedCompareExchange(&g_ingameOverlay, 0, 0) || g_recoveryPresent) && (quiet || loadingPanel) && pi->swapchainCount >= 1) {
             VkSwapchainKHR sc = pi->pSwapchains[0];
             uint32_t idx = pi->pImageIndices[0];
             if ((!g_rInit || sc != g_theSc) && !g_rFail) InitRender(sc);
-            if (g_rInit && !g_rFail && sc == g_theSc) { DrawButton(q, idx); PollClick(); }
+            if (g_rInit && !g_rFail && sc == g_theSc) { DrawButton(q, idx); if (quiet) PollClick(); }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         static bool once = false;
         if (!once) { once = true; Log("[menu] myPresent FAULT exc=%lx (rInit=%d rFail=%d)\n",
             GetExceptionCode(), (int)g_rInit, (int)g_rFail); }
     }
+    if (NoWsi() && pi) {
+        // the window system never sees this frame: consume the wait semaphores,
+        // report success for every swapchain, pace the loop to NORENDER_FPS
+        NullSignal(q, VK_NULL_HANDLE, VK_NULL_HANDLE, pi->waitSemaphoreCount, pi->pWaitSemaphores);
+        if (pi->pResults) for (uint32_t i = 0; i < pi->swapchainCount; ++i) pi->pResults[i] = VK_SUCCESS;
+        NullPace(NORENDER_FPS);
+        return VK_SUCCESS;
+    }
+    if (NoRender()) NullPace((double)g_flagDedFps);   // headless with the window system: dedicated_fps
     return g_realPresent(q, pi);
 }
 
@@ -1999,6 +2151,12 @@ static VkResult myCreateSwapchain(VkDevice dev, const VkSwapchainCreateInfoKHR* 
 {
     VkResult r = g_origCreateSc(dev, ci, a, sc);
     if (r == VK_SUCCESS && ci) {
+        if (!g_origGetScImages && g_origGdpa) g_origGetScImages = (PFN_vkGetSwapchainImagesKHR)g_origGdpa(dev, "vkGetSwapchainImagesKHR");
+        uint32_t cnt = 0;
+        if (g_origGetScImages && sc && g_origGetScImages(dev, *sc, &cnt, nullptr) == VK_SUCCESS && cnt > 0) {
+            InterlockedExchange(&g_nullScCount, (LONG)cnt); InterlockedExchange(&g_nullScNext, 0);
+            if (NoWsi()) Log("[menu] no-render: swapchain of %u images -- acquire and present are answered here, never by the window system\n", cnt);
+        }
         g_scFormat = ci->imageFormat; g_scExtent = ci->imageExtent; g_scUsage = ci->imageUsage;
         g_rInit = false; g_rFail = false;   // rebuild on next present
         // The panel and backdrop images were created against the OLD format and
@@ -2015,10 +2173,103 @@ static VkResult myCreateSwapchain(VkDevice dev, const VkSwapchainCreateInfoKHR* 
     return r;
 }
 
+// an empty submit that only signals (acquire) or only waits (present): what the
+// window system would have done to those semaphores and that fence
+static void NullSignal(VkQueue q, VkSemaphore signalSem, VkFence fence, uint32_t waitCount, const VkSemaphore* waitSems)
+{
+    if (!g_origSubmit || q == VK_NULL_HANDLE) return;
+    VkPipelineStageFlags stages[16];
+    if (waitCount > 16) waitCount = 16;
+    for (uint32_t i = 0; i < waitCount; ++i) stages[i] = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkSubmitInfo si{}; si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.waitSemaphoreCount = waitCount; si.pWaitSemaphores = waitCount ? waitSems : nullptr; si.pWaitDstStageMask = waitCount ? stages : nullptr;
+    si.signalSemaphoreCount = signalSem != VK_NULL_HANDLE ? 1 : 0; si.pSignalSemaphores = signalSem != VK_NULL_HANDLE ? &signalSem : nullptr;
+    g_origSubmit(q, 1, &si, fence);
+}
+static VkResult NullAcquire(VkSemaphore sem, VkFence fence, uint32_t* pIndex)
+{
+    LONG cnt = InterlockedCompareExchange(&g_nullScCount, 0, 0);
+    if (cnt <= 0) cnt = 3;
+    LONG i = InterlockedIncrement(&g_nullScNext) - 1;
+    if (pIndex) *pIndex = (uint32_t)(i % cnt);
+    NullSignal(g_qFromFam, sem, fence, 0, nullptr);
+    return VK_SUCCESS;
+}
+static VkResult VKAPI_CALL myAcquire(VkDevice dev, VkSwapchainKHR sc, uint64_t timeout, VkSemaphore sem, VkFence fence, uint32_t* pIndex)
+{
+    if (!NoWsi()) return g_origAcquire(dev, sc, timeout, sem, fence, pIndex);
+    return NullAcquire(sem, fence, pIndex);
+}
+static VkResult VKAPI_CALL myAcquire2(VkDevice dev, const VkAcquireNextImageInfoKHR* info, uint32_t* pIndex)
+{
+    if (!NoWsi()) return g_origAcquire2(dev, info, pIndex);
+    return NullAcquire(info ? info->semaphore : VK_NULL_HANDLE, info ? info->fence : VK_NULL_HANDLE, pIndex);
+}
+// the frame pace: `fps` frames a second, slept here (the window system's pace,
+// or the lack of one, no longer decides)
+static void NullPace(double fps)
+{
+    static LARGE_INTEGER freq{}, next{};
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    LARGE_INTEGER now; QueryPerformanceCounter(&now);
+    const LONGLONG period = (LONGLONG)(freq.QuadPart / (fps > 1.0 ? fps : 1.0));
+    if (!next.QuadPart || now.QuadPart > next.QuadPart + 4 * period) next.QuadPart = now.QuadPart;   // first frame, or far behind: restart the grid
+    next.QuadPart += period;
+    LONGLONG wait = next.QuadPart - now.QuadPart;
+    if (wait > 0) {
+        DWORD ms = (DWORD)(wait * 1000 / freq.QuadPart);
+        if (ms > 1) Sleep(ms - 1);
+        do { QueryPerformanceCounter(&now); } while (now.QuadPart < next.QuadPart);
+    }
+}
+
+// vkQueueSubmit with the command buffers taken out: the fence and the semaphores
+// are signalled as the engine expects, nothing is rasterized. Our own overlay
+// submits go through pSubmit (the real one) and are skipped anyway (myPresent).
+static VkResult VKAPI_CALL mySubmit(VkQueue q, uint32_t n, const VkSubmitInfo* pSubmits, VkFence fence)
+{
+    if (!InterlockedCompareExchange(&g_noRender, 0, 0) || n == 0 || !pSubmits) return g_origSubmit(q, n, pSubmits, fence);
+    VkSubmitInfo local[8];
+    VkSubmitInfo* copy = (n <= 8) ? local : (VkSubmitInfo*)_alloca(sizeof(VkSubmitInfo) * n);
+    LONG dropped = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        copy[i] = pSubmits[i];
+        dropped += (LONG)copy[i].commandBufferCount;
+        copy[i].commandBufferCount = 0;
+        copy[i].pCommandBuffers = nullptr;
+    }
+    InterlockedIncrement(&g_noRenderSubmits);
+    InterlockedAdd(&g_noRenderCmdBufs, dropped);
+    return g_origSubmit(q, n, copy, fence);
+}
+// a query that never ran has no result: zeros, available now (a WAIT would never return)
+static VkResult VKAPI_CALL myQueryResults(VkDevice dev, VkQueryPool pool, uint32_t first, uint32_t count,
+                                          size_t dataSize, void* pData, VkDeviceSize stride, VkQueryResultFlags flags)
+{
+    if (!InterlockedCompareExchange(&g_noRender, 0, 0)) return g_origQueryResults(dev, pool, first, count, dataSize, pData, stride, flags);
+    if (pData && dataSize) memset(pData, 0, dataSize);
+    return VK_SUCCESS;
+}
 static PFN_vkVoidFunction myGdpa(VkDevice dev, const char* name)
 {
     PFN_vkVoidFunction real = g_origGdpa(dev, name);
     if (!name || !real) return real;
+    if (strcmp(name, "vkQueueSubmit") == 0) {
+        g_origSubmit = (PFN_vkQueueSubmit)real;
+        if (NoRender()) Log("[menu] intercepted vkQueueSubmit dev=%p -- dedicated_render=0: no command buffer will run\n", dev);
+        return (PFN_vkVoidFunction)mySubmit;
+    }
+    if (strcmp(name, "vkGetQueryPoolResults") == 0) {
+        g_origQueryResults = (PFN_vkGetQueryPoolResults)real; return (PFN_vkVoidFunction)myQueryResults;
+    }
+    if (strcmp(name, "vkAcquireNextImageKHR") == 0) {
+        g_origAcquire = (PFN_vkAcquireNextImageKHR)real; return (PFN_vkVoidFunction)myAcquire;
+    }
+    if (strcmp(name, "vkAcquireNextImage2KHR") == 0) {
+        g_origAcquire2 = (PFN_vkAcquireNextImage2KHR)real; return (PFN_vkVoidFunction)myAcquire2;
+    }
+    if (NoRender() && (strcmp(name, "vkQueueSubmit2") == 0 || strcmp(name, "vkQueueSubmit2KHR") == 0))
+        Log("[menu] the game resolves %s -- not intercepted, rendering may still run\n", name);
     if (strcmp(name, "vkQueuePresentKHR") == 0) {
         g_realPresent = (PFN_vkQueuePresentKHR)real; g_dev = dev;
         Log("[menu] intercepted vkQueuePresentKHR dev=%p real=%p\n", dev, real);
@@ -2382,7 +2633,10 @@ extern "C" {
     void* g_gameUiTramp = nullptr;
     void  GameUiRelay();
     volatile uint64_t g_gameUi = 0;                 // UI::CGameUI 'this', per frame
-    void GameUiSeen(uint64_t rcx) { g_gameUi = rcx; }
+    void GameUiSeen(uint64_t rcx) {
+        if (!g_gameUi && rcx) InterlockedExchange(&g_hostMenuLoad, 0);   // a NEW world is up: a switch in flight is over
+        g_gameUi = rcx;
+    }
 }
 static const uintptr_t RVA_GAMEUI_UPDATE = 0x5741d0;
 static const int       STEAL_GAMEUI      = 21;
@@ -3200,7 +3454,12 @@ static void OnStartSavegame(const void* params, bool accepted, bool ours)
     Log("[menu] menu load of '%s' from page %ld (hosting=%d players=%d)\n",
         name, InterlockedCompareExchange(&g_lastPage, 0, 0), hosting ? 1 : 0, players);
     if (!hosting || !name[0]) return;
-    if (players < 2) { Log("[menu] menu load while hosting with nobody in the lobby -- not shared\n"); return; }
+    // On a relay lobby the relay keeps the world for the next player, so the
+    // leader's load is uploaded even with nobody else in (2026-09-18: a swap
+    // taken alone was "not shared", the relay kept the old save, and the
+    // leader's next join got the old world back).
+    const bool relay = InterlockedCompareExchange(&g_lobbyRelay, 0, 0) != 0;
+    if (players < 2 && !relay) { Log("[menu] menu load while hosting with nobody in the lobby -- not shared\n"); return; }
     wchar_t wn[300]; MultiByteToWideChar(CP_UTF8, 0, name, -1, wn, 300);
     wchar_t path[600]; _snwprintf_s(path, _TRUNCATE, L"%s\\%s.sav", SAVE_DIR, wn);
     if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
@@ -3221,10 +3480,15 @@ static void OnStartSavegame(const void* params, bool accepted, bool ours)
     line += "}";
     LobbySend(line.c_str());
     MarkSaveShared();     // a joiner arriving right after reuses this save
+    // The engine builds the title page between the old world and the loading
+    // screen of THIS load; MyCreatePage must not read that as "left the world"
+    // (it did: the host's every mid-session load LEFT the lobby, 2026-09-18).
+    if (switching) InterlockedExchange(&g_hostMenuLoad, 1);
     char st[240];
     if (switching) {
-        snprintf(st, sizeof(st), "Switching everyone to '%s'\xE2\x80\xA6", name);
-        Log("[menu] world switch: the host loaded %ls mid-session -- pushing it to %d player(s)\n", path, players - 1);
+        if (relay && players < 2) snprintf(st, sizeof(st), "Uploading '%s' to the server\xE2\x80\xA6", name);
+        else snprintf(st, sizeof(st), "Switching everyone to '%s'\xE2\x80\xA6", name);
+        Log("[menu] world switch: the host loaded %ls mid-session -- pushing it to %d player(s)%s\n", path, players - 1, relay ? " and the relay" : "");
     } else {
         InterlockedExchange(&g_hostLoadedItself, 1);
         snprintf(st, sizeof(st), "Sharing '%s' with %d player(s)\xE2\x80\xA6", name, players - 1);
@@ -3433,6 +3697,8 @@ static DWORD WINAPI LobbyThread(LPVOID param)
                                wchar_t t[400]; _snwprintf_s(t, _TRUNCATE, L" --publish %s%s", wm, a->pub ? L" --public" : L""); wcscat_s(wpub, t); }
         if (g_flagShareMods == 2) wcscat_s(wpub, L" --no-share-mods");   // the host never sends its mods either
         if (a->sep) wcscat_s(wpub, L" --companies");                    // SEPARATE COMPANIES: the lobby assigns a company per player
+        if (g_flagDedicated) wcscat_s(wpub, L" --dedicated");            // a stable code across restarts, listed as a dedicated server
+        if (g_flagDedicated && g_flagDedPort) { wchar_t t[40]; _snwprintf_s(t, _TRUNCATE, L" --local-port %d", g_flagDedPort); wcscat_s(wpub, t); }
         _snwprintf_s(cmd, _TRUNCATE, L"%s host --name \"%s\" --game-relay-port %d --game-local-port %d %s%s%s",
                      base, wname, relayPort, bridgePort, fwd, wpass, wpub);
     }
@@ -3595,7 +3861,15 @@ static DWORD WINAPI LobbyThread(LPVOID param)
                             if(!strcmp(phase,"complete")) {
                                 InterlockedExchange(&g_recoveryPresent,0);
                                 InterlockedExchange(&g_lobbyDone,1);
-                                if(InterlockedCompareExchange(&g_uiState,0,0)==3) InterlockedExchange(&g_uiState,0);
+                                // Back to the LOBBY VIEW when the panel is open (2026-09-18, user:
+                                // "keep the lobby view up after we load into the game"): the loading
+                                // screen hands the panel over to the game open on the roster, then the
+                                // frozen join's phases took it to this recovery view and its completion
+                                // collapsed it to nothing. Collapsed only when nothing had it open.
+                                if(InterlockedCompareExchange(&g_uiState,0,0)==3) {
+                                    const bool open = InterlockedCompareExchange(&g_ingameOverlay,0,0) || InterlockedCompareExchange(&g_showOverlay,0,0);
+                                    InterlockedExchange(&g_uiState, open ? 2 : 0);
+                                }
                             } else {
                                 InterlockedExchange(&g_uiState,3);
                             }
@@ -3795,6 +4069,11 @@ static void TeardownLobby(int waitMs, bool joinThread)
     if (g_lobbyCsInit) EnterCriticalSection(&g_lobbyCs);
     QuitLobbyProc(g_lobbyProc, waitMs);
     if (g_lobbyCsInit) LeaveCriticalSection(&g_lobbyCs);
+    // The lobby's company assignment dies with the lobby. Left behind, the file
+    // made a single-player load read as a two-company lobby session and the
+    // save's own companies record was the loser (2026-09-18); with no file the
+    // game script keeps whatever companies the save carries.
+    { wchar_t cfg[MAX_PATH]; _snwprintf_s(cfg, _TRUNCATE, L"%smp_company_cfg.txt", g_dataDirW); DeleteFileW(cfg); }
     if (joinThread && g_lobbyThread) {
         if (WaitForSingleObject(g_lobbyThread, 3000) != WAIT_OBJECT_0) Log("[menu] lobby tail thread did not exit in time\n");
         CloseHandle(g_lobbyThread); g_lobbyThread = nullptr;
@@ -3856,6 +4135,102 @@ static void LeaveLobby()
     EnterCriticalSection(&g_statusCs); g_modsPrompt[0] = 0; LeaveCriticalSection(&g_statusCs);
     InterlockedExchange(&g_modRefreshPending, 0);
     InterlockedExchange(&g_uiState, 1); InterlockedExchange(&g_panelDirty, 1);
+}
+
+// ---------------- dedicated server ----------------
+// Runs once a second from myPresent while dedicated=1. Three states, each
+// self-healing: no lobby -> host one; lobby but no world -> load the configured
+// (else the newest) save through the ordinary shared-save autoload, so a joiner
+// arriving later reuses that save and the lobby counts the host as started;
+// world up -> force the game's own autosave every dedicated_autosave_min, so a
+// crash restarts from a fresh world (the newest save is what the next launch
+// loads). A crash to the title menu leaves the lobby (g_leaveOnMenu), and the
+// first state hosts again.
+static ULONGLONG g_dedLastHost = 0, g_dedLastLoad = 0, g_dedLastSave = 0, g_dedWorldUpSince = 0, g_dedMenuSince = 0;
+static bool g_dedFileWritten = false;
+static const ULONGLONG DED_MENU_SETTLE_MS = 8000;   // the title menu's main page has been up this long before we act on it
+static const ULONGLONG DED_LOAD_MIN_UPTIME_MS = 45000;   // and this long before the first LOAD: two launches that loaded ~10 s in crashed mid-load (16:26, no assertion)
+static void DedicatedTick()
+{
+    if (!g_flagDedicated) return;
+    const ULONGLONG now = GetTickCount64();
+    static ULONGLONG lastTick = 0;
+    if (now - lastTick < 1000) return;   // by the clock: on a software renderer 60 presents of the title menu took minutes
+    lastTick = now;
+    if (!g_dedFileWritten) {
+        // the mod's half: pause while nobody else is in (mp/pacing.lua CM.dedicatedPauseEmpty)
+        g_dedFileWritten = true;
+        wchar_t p[MAX_PATH]; _snwprintf_s(p, _TRUNCATE, L"%smp_dedicated.txt", g_dataDirW);
+        FILE* f = _wfsopen(p, L"w", _SH_DENYNO);
+        if (f) { fprintf(f, "dedicated=1\nempty_speed=%d\npause_empty=%d\npin_batch=%d\n", g_flagDedEmptySpeed, g_flagDedEmptySpeed == 0 ? 1 : 0, g_flagDedPinBatch); fclose(f); }
+    }
+    const bool world = WorldLoaded();
+    // At the title menu, act only once its main page (CreatePage 2 -> g_showOverlay) has
+    // been up for a while. Hosting on the first CMenuUI frame and loading a second later
+    // ran StartSavegame inside the page's own InvokeStoredFunctions and the engine
+    // asserted `!m_isInvoking` (the first run on the VPS, 2026-09-18 16:05).
+    if (!world) {
+        if (!InterlockedCompareExchange(&g_showOverlay, 0, 0)) { g_dedMenuSince = 0; return; }
+        if (!g_dedMenuSince) g_dedMenuSince = now;
+        if (now - g_dedMenuSince < DED_MENU_SETTLE_MS) return;
+    }
+    if (!LobbyRunning()) {
+        if (world) return;   // a world without a lobby is the moment after a crash to the menu: wait for it
+        if (now - g_dedLastHost < 15000) return;
+        g_dedLastHost = now;
+        if (g_flagDedName[0]) strcpy_s(g_username, g_flagDedName);
+        if (g_flagDedLobby[0]) strcpy_s(g_lobbyName, g_flagDedLobby);
+        strcpy_s(g_passCode, g_flagDedPassword); g_passLen = (int)strlen(g_passCode);
+        InterlockedExchange(&g_public, g_flagDedPublic ? 1 : 0);
+        InterlockedExchange(&g_sepCompanies, g_flagDedCompanies ? 1 : 0);
+        ensureUsername();
+        Log("[dedicated] hosting lobby '%s' as '%s' (%s, %s)\n", g_lobbyName[0] ? g_lobbyName : "(default)", g_username,
+            g_flagDedPublic ? "public" : "unlisted", g_flagDedPassword[0] ? "password" : "open");
+        StartLobby(0);
+        return;
+    }
+    if (!world) {
+        g_dedWorldUpSince = 0;
+        if (!InterlockedCompareExchange(&g_lobbyReady, 0, 0)) return;
+        if (InterlockedCompareExchange(&g_autoLoadPending, 0, 0) || NativeIo::Busy()) return;
+        if (now - g_dedLastLoad < 60000) return;   // a load takes as long as it takes: one request a minute
+        if (now - g_dedMenuSince < DED_LOAD_MIN_UPTIME_MS) return;   // let the engine finish its own start-up work first
+        g_dedLastLoad = now;
+        wchar_t path[600] = L"";
+        if (g_flagDedSave[0]) {
+            wchar_t wn[64]; MultiByteToWideChar(CP_UTF8, 0, g_flagDedSave, -1, wn, 64);
+            _snwprintf_s(path, _TRUNCATE, L"%s\\%s.sav", SAVE_DIR, wn);
+            if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) { Log("[dedicated] %ls not found -- loading the newest save instead\n", path); path[0] = 0; }
+        }
+        if (!path[0] && !newestSave(path, 600)) {
+            Log("[dedicated] no save in %ls -- nothing to load (put one there, or set dedicated_save)\n", SAVE_DIR);
+            return;
+        }
+        wcscpy_s(g_startSaveW, path);
+        MarkSaveShared();                     // a joiner arriving before the first autosave reuses this save
+        Log("[dedicated] loading %ls\n", path);
+        if (doStartLoad(path)) ArmStageWatch("loading world");
+        return;
+    }
+    if (!g_dedWorldUpSince) g_dedWorldUpSince = now;
+    if (NoRender()) {
+        static ULONGLONG lastCount = 0;
+        if (now - lastCount >= 60000) {
+            lastCount = now;
+            static LONG lastPresents = 0; static ULONGLONG lastAt = 0;
+            const LONG presents = InterlockedCompareExchange(&g_presentCount, 0, 0);
+            const double fps = lastAt ? (presents - lastPresents) * 1000.0 / (double)(now - lastAt) : 0.0;
+            lastPresents = presents; lastAt = now;
+            Log("[dedicated] no-render: %ld submits, %ld command buffers dropped so far; %.1f frames/s (paced to %.0f)\n",
+                InterlockedCompareExchange(&g_noRenderSubmits, 0, 0), InterlockedCompareExchange(&g_noRenderCmdBufs, 0, 0), fps,
+                NoWsi() ? NORENDER_FPS : (double)g_flagDedFps);
+        }
+    }
+    if (g_flagDedAutosaveMin > 0 && now - g_dedWorldUpSince > 60000 && !NativeIo::Busy()
+        && now - g_dedLastSave > (ULONGLONG)g_flagDedAutosaveMin * 60000ULL) {
+        g_dedLastSave = now;
+        if (ForceAutosave()) Log("[dedicated] autosave forced (every %d min)\n", g_flagDedAutosaveMin);
+    }
 }
 
 // in-frame chat text input: poll key edges while in the lobby
@@ -4076,10 +4451,12 @@ static void MyCreatePage(uint64_t thisp, int page)
         // "Player disconnected or roster changed" (2026-09-16).
         if (g_gameUi != 0 && LobbyRunning()) {
             if (NativeIo::Loading()) Log("[menu] the title menu was built by our own load (resync) -- staying in the lobby\n");
+            else if (InterlockedExchange(&g_hostMenuLoad, 0)) Log("[menu] the title menu was built by the host's own world switch -- staying in the lobby\n");
             else InterlockedExchange(&g_leaveOnMenu, 1);
         }
         g_gameUi = 0;
         InterlockedExchange(&g_ingameOverlay, 0);
+        InterlockedExchange(&g_loadingPanel, 0);
         // Keep recovery reachable at the title menu after a failed load.
         if (InterlockedCompareExchange(&g_recoveryPresent, 0, 0) && g_modelCsInit) {
             EnterCriticalSection(&g_modelCs);
@@ -4088,7 +4465,14 @@ static void MyCreatePage(uint64_t thisp, int page)
             if (open) { InterlockedExchange(&g_uiState, 3); InterlockedExchange(&g_panelDirty, 1); }
         }
     }
-    else if (page >= 3) InterlockedExchange(&g_showOverlay, 0);
+    else if (page == 16 && LobbyRunning()) {
+        InterlockedExchange(&g_showOverlay, 1);
+        InterlockedExchange(&g_loadingPanel, 1);
+        if (InterlockedCompareExchange(&g_uiState, 0, 0) != 2) InterlockedExchange(&g_uiState, 2);
+        InterlockedExchange(&g_panelDirty, 1);
+        Log("[menu] loading screen with a lobby running -- the panel stays up with the roster\n");
+    }
+    else if (page >= 3) { InterlockedExchange(&g_showOverlay, 0); InterlockedExchange(&g_loadingPanel, 0); }
     static int seen = 0;
     if (seen < 30) { seen++; Log("[menu] CreatePage page=%d show=%ld\n", page,
         InterlockedCompareExchange(&g_showOverlay, 0, 0)); }

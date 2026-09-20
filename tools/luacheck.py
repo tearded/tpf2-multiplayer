@@ -89,6 +89,48 @@ def _blank_noncode(src: str) -> str:
     return "".join(out)
 
 
+_LONG_OPEN = re.compile(r"\[(=*)\[")
+
+
+def _blank_long_brackets(src: str) -> str:
+    """Replace long strings and long comments (`[[ ]]`, `[==[ ]==]`, `--[[ ]]`)
+    with spaces, keeping line numbers and every quoted string.
+
+    A long string may span lines and hold an apostrophe ("the host's save" in
+    the Workshop signpost's description), which the per-line quote walk of
+    check_unterminated_strings would read as an unterminated string.
+    """
+    out = list(src)
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        start = i + 2 if src.startswith("--", i) else i
+        m = _LONG_OPEN.match(src, start)
+        if m:
+            close = "]" + "=" * len(m.group(1)) + "]"
+            j = src.find(close, m.end())
+            j = n if j < 0 else j + len(close)
+            for k in range(i, j):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = j
+            continue
+        if src.startswith("--", i):                      # line comment: left as is
+            j = src.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if c in "\"'":                                   # quoted string: left as is
+            q, j = c, i + 1
+            while j < n and src[j] != q and src[j] != "\n":
+                if src[j] == "\\":
+                    j += 1
+                j += 1
+            i = min(j + 1, n)
+            continue
+        i += 1
+    return "".join(out)
+
+
 def check_unterminated_strings(path: pathlib.Path, src: str) -> bool:
     """Flag a quoted string with a raw newline inside it.
 
@@ -99,7 +141,7 @@ def check_unterminated_strings(path: pathlib.Path, src: str) -> bool:
     `mptest.lua:1362: unfinished string near '"go'`.
     """
     bad = []
-    for lineno, line in enumerate(src.split("\n"), start=1):
+    for lineno, line in enumerate(_blank_long_brackets(src).split("\n"), start=1):
         # walk the line, skipping comments, tracking quote state
         i, n, q = 0, len(line), None
         while i < n:

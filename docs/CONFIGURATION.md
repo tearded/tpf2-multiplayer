@@ -51,6 +51,19 @@ setting at its default.
 | `share_mods` | `ask` | `ask`, `always`, `never` | Only matters when a host runs the lobby with `--share-mods` (mod sharing is off by default): mods the shared save needs and you lack. `ask` shows a YES / NO in the panel when the host presses START GAME (no answer in 90 s counts as no), `always` downloads without asking, `never` declines. |
 | `slot` | 0 | 0-7 | Position of the Multiplayer entry in the title menu's list (0 = top). |
 | `scale` | 0 | 0.5-3 | Panel scale; 0 = screen height / 1080. |
+| `dedicated` | 0 | `0`, `1` | `1`: dedicated server mode -- the title menu hosts a lobby by itself, loads a world and keeps it up ([DEDICATED_SERVER.md](DEDICATED_SERVER.md)). |
+| `dedicated_save` | empty | a save name (no path parts), under 64 characters | The save the server loads; empty: the newest save in the save folder. |
+| `dedicated_lobby` | empty | text without quotes, under 64 characters | The lobby name in the public list. |
+| `dedicated_name` | empty | no blanks or quotes, under 32 characters | The server's player name; empty: the Steam persona or a random name. |
+| `dedicated_password` | empty | no blanks or quotes, under 40 characters | Lobby password; empty: open. |
+| `dedicated_public` | 1 | `0`, `1` | Listed on the master server. |
+| `dedicated_companies` | 0 | `0`, `1` | SEPARATE COMPANIES: the lobby gives each player their own company. |
+| `dedicated_autosave_min` | 10 | 0-600 | The game's own autosave this often while a world is up; 0 never. A restart loads the newest save. |
+| `dedicated_empty_speed` | 1 | `0`..`4` | The world's speed while nobody else is in (0 = paused); when someone joins it resumes at the players' votes. `dedicated_pause_empty=1` is the older spelling of 0. |
+| `dedicated_port` | 0 | 1024-65535 | The lobby's UDP/TCP port (0: the default 29471). A box that also runs the dedicated relay needs another. |
+| `dedicated_pin_batch` | 1 | `0`, `1` | 1: the engine's simulation batch interval is pinned at its nominal 200 ms instead of the engine's own estimate, which on a VPS with CPU steal sits at 300-400 ms while the sim thread is half idle. |
+| `dedicated_fps` | 30 | 5-240 | With `dedicated_render=0`: the headless frame rate the present is paced to. The engine needs only 5 batches a second; every frame beyond is scene prep on the thread that hands the sim its batches. |
+| `dedicated_render` | 0 | `0`, `1` | 0: no command buffer reaches the GPU (fences and semaphores are still signalled), so a software Vulkan (lavapipe) costs nothing and the panel is not drawn; 1: the game renders as usual. |
 | `automod` | on | a line starting `automod=0` | Stops the panel adding the Transport Fever 2 Multiplayer mod to the game's default mod list. |
 | `sharedstations` | on | a line starting `sharedstations=0` | Read by the slice DLL, not the menu. Off leaves the line editor's owner check alone, so in companies mode another company's station cannot be put on your line (see SHARED_INFRA.md). |
 

@@ -64,7 +64,7 @@ has to be reachable directly when the master is unreachable, or when both ends s
 behind symmetric NAT or CGNAT. A dedicated relay does not poll: its port is open.
 
 **Joiner.** `netpunch.exe join <code>` decodes the code, observes its own socket (no
-UPnP), and sends HELLO every 100 ms to the host's candidates, LAN first, until an ACK
+UPnP), and sends HELLO every 100 ms to the host's candidates, VPN adapter first when the host has one (Hamachi 25.0.0.0/8 or Tailscale 100.64.0.0/10, or `TPF2MP_VPN_IP`; carried as a trailing field of the code, so two players on one virtual LAN connect without any NAT), then LAN, until an ACK
 echoes its token or 40 s pass. Punching is the fallback: a host whose port is open (UPnP,
 a forward) answers within a second and nothing else happens. If there is no answer after
 4 s, the joiner **knocks**: every 2 s it posts its own
@@ -73,9 +73,25 @@ secret (and password), under a tag also derived from the secret
 (`SHA-256("tpf2mp-rendezvous-v1|" + secret)`, 24 hex characters). The master can
 neither read a knock nor tell which lobby a tag belongs to, and keeps knocks for 60 s.
 If the joiner's public address equals the host's, only the LAN candidate is used (no
-NAT hairpin). There is no TURN server and no port prediction. `--rendezvous <url>`
+NAT hairpin). There is no port prediction. `--rendezvous <url>`
 picks the master used for knocks (default: `--publish`, else the project's);
 `--rendezvous off` disables them.
+
+**Relay fallback.** A host behind CGNAT cannot be punched and a joiner behind a
+symmetric NAT cannot be punched toward, so that pair had no path at all. From its second
+knock on, a joiner still unanswered adds `relay: 1` and a nonce to the knock; the master
+binds one UDP port of its `--relay-ports` range for that joiner and returns
+`{"relay": {"ip", "port", "id"}}`, and hands the same allocation to the host with
+the note. Each end sends a bind packet (`TRLB` + the 16-byte id + `J` or `H`) to that
+port from its game socket; from then on the port swaps every datagram between the two
+addresses it learned, verbatim. The joiner adds the port to its dial as one more
+candidate, so a direct path that answers first still wins; the host binds every
+200 ms until the joiner's frames arrive through the port. The frames stay sealed with
+the session key: the master forwards bytes it cannot read, and a port dies after 90 s
+without traffic. Save transfers to a relayed joiner take the UDP path (the TCP side
+channel dials the host directly and fails). A master started without `--relay-ip`
+offers no relay and the punch stays the only fallback; a host or joiner from before
+this ignores the field. Tested in `tools/rendezvous_test.py` (sections 5 and 6).
 
 **Joiner to joiner (mesh).** Every joiner puts its own profile code in its `join`, the
 host shares all profiles in the roster, and joiners dial each other on their single

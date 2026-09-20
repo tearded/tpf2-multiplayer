@@ -200,9 +200,38 @@ def request_catalogue():
     return token
 
 
+def library_root():
+    """The Steam LIBRARY that holds the game (<lib>\\steamapps\\common\\Transport
+    Fever 2 -> <lib>), or None. Workshop content lives in the library of the
+    game, not in Steam's own folder: a host with the game on D:\\SteamLibrary
+    keeps its Workshop mods under D:, and looking only under C:\\...\\Steam found
+    none of them -- every joiner got "The host cannot supply all required
+    mods" (2026-09-18)."""
+    g = game_dir()
+    if not g:
+        return None
+    lib = os.path.dirname(os.path.dirname(os.path.dirname(g)))
+    return lib if os.path.isdir(os.path.join(lib, "steamapps")) else None
+
+
+def workshop_dirs():
+    """Every Workshop content folder this game's mods could be in: the game's
+    library first, then Steam's own folder (the same place when the game is
+    installed there)."""
+    out = []
+    for root in (library_root(), steam_root()):
+        if root:
+            p = os.path.join(root, "steamapps", "workshop", "content", TF2_APPID)
+            if p not in out:
+                out.append(p)
+    return out
+
+
 def workshop_dir():
-    root = steam_root()
-    return os.path.join(root, "steamapps", "workshop", "content", TF2_APPID) if root else None
+    """The Workshop content folder of the game's library (the first of
+    workshop_dirs), or None."""
+    dirs = workshop_dirs()
+    return dirs[0] if dirs else None
 
 
 def mod_folder_name(mod_id, version):
@@ -214,7 +243,7 @@ def find_mod(mod_id, version):
     if not valid_mod(mod_id, version):
         return None
     if mod_id.startswith("*"):
-        for w in (workshop_dir(), managed_workshop()):
+        for w in workshop_dirs() + [managed_workshop()]:
             p = w and os.path.join(w, mod_id[1:])
             if p and os.path.isfile(os.path.join(p, "mod.lua")):
                 return p
@@ -275,7 +304,9 @@ def _decompress_until(path, marker, tail=64):
     out = bytearray()
     dec = zstandard.ZstdDecompressor().decompressobj()
     scanned = 0
-    with open(path, "rb") as f:
+    # the save's bytes in memory (a sync snapshot) read the same way as a file
+    opener = (lambda: io.BytesIO(path)) if isinstance(path, (bytes, bytearray, memoryview)) else (lambda: open(path, "rb"))
+    with opener() as f:
         while True:
             chunk = f.read(DECOMPRESS_CHUNK)
             if not chunk:
@@ -357,9 +388,20 @@ def save_mod_list(save_path, log=None):
     empty); None if the list could not be READ -- zstandard missing, not a
     save, layout not recognised. A None is UNKNOWN: it means "we cannot tell
     which mods this save needs", never "none". ``log`` hears why."""
+    return _save_mod_list_from(save_path, save_path, log)
+
+
+def save_mod_list_bytes(data, log=None, label="the sync save"):
+    """save_mod_list for a save held in memory (a frozen join's or resync's
+    snapshot): the same answer, the same None for unknown."""
+    return _save_mod_list_from(data, label, log)
+
+
+def _save_mod_list_from(source, label, log):
+    save_path = label
     log = log or (lambda s: None)
     try:
-        head = _decompress_until(save_path, SETTINGS_ANCHOR)
+        head = _decompress_until(source, SETTINGS_ANCHOR)
     except OSError as e:
         log(f"[mods] cannot read the mod list of {save_path}: {e}")
         return None
@@ -382,6 +424,24 @@ def save_mod_list(save_path, log=None):
 # ---------------------------------------------------------------------------
 # zip / unzip
 # ---------------------------------------------------------------------------
+def folder_bytes(folder):
+    """Bytes of files under ``folder`` (what zip_mod would read); 0 if unreadable."""
+    total = 0
+    try:
+        for root, dirs, files in os.walk(folder):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for fn in files:
+                p = os.path.join(root, fn)
+                if not os.path.islink(p):
+                    try:
+                        total += os.path.getsize(p)
+                    except OSError:
+                        pass
+    except OSError:
+        pass
+    return total
+
+
 def zip_mod(folder, log=None):
     """The folder as one zip (entries relative to the folder) -- bytes. No
     size cap (512 MB until 2026-09-16: a big vehicle pack was silently "not

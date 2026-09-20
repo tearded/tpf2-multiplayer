@@ -1351,7 +1351,40 @@ function CM.pollInject()
 				elseif bad or not (r and g and b) or not nameTok then
 					log(string.format("LCREATE: decoded create REJECTED (%s) -- it was cancelled and is LOST; create the line again",
 						bad or "name or colour unreadable"))
+				elseif tonumber(line:match(" spare=(%d+)")) and CM.spareKey and CM.lineKeyOf[tonumber(line:match(" spare=(%d+)"))] == CM.spareKey() then
+					-- THE SPARE (lines.lua): the slice already opened the editor on our
+					-- pre-made line. Ours here and now -- ownership is not simulated --
+					-- and everyone's, renamed and re-keyed, at the stamp.
+					local spareId = tonumber(line:match(" spare=(%d+)"))
+					local spareKey = CM.spareKey()
+					local okO, errO = pcall(CM.cmSetPlayer, spareId, api.engine.util.getPlayer())
+					local seqBefore = CM.seqNo
+					CM.scheduleLocal("LCREATE", { name = nameTok, color = string.format("%.9g,%.9g,%.9g", r, g, b),
+					                           wait = wait, stops = table.concat(stops, ";"), alts = table.concat(alts, ";"),
+					                           armed = 1, spare = spareKey })
+					if CM.seqNo ~= seqBefore then
+						CM.lineRekey(spareId, K.INSTANCE .. ":" .. tostring(CM.seqNo))
+						CM.spareWrite(nil)
+						-- its colour now, here (cosmetic; the claim sets it everywhere at the
+						-- stamp; the slice echo of this replay is expected, not a click)
+						pcall(function()
+							if CM.expectColorEcho then CM.expectColorEcho(spareId, r, g, b) end
+							api.cmd.sendCommand(api.cmd.make.setColor(spareId, api.type.Vec3f.new(r, g, b)), function() end)
+						end)
+						-- the GUI thread renames it and, through that, lets the slice open
+						-- the editor on it once the line manager lists it
+						if CM.spareFireWrite then CM.spareFireWrite(spareId, nameTok) end
+						log(string.format("LCREATE: '%s' is spare line %d (%s), the editor has it already -- ours now (ok=%s%s), everyone's at the stamp as %s:%d",
+							CM.unescName(nameTok), spareId, spareKey, tostring(okO), okO and "" or " " .. tostring(errO), K.INSTANCE, CM.seqNo))
+					else
+						log(string.format("LCREATE: spare line %d could not be scheduled (a hold) -- it stays the pool's", spareId))
+					end
 				else
+					local spareId = tonumber(line:match(" spare=(%d+)"))
+					if spareId then
+						log(string.format("LCREATE: the slice opened the editor on line %d as a spare, but it is not ours here (%s) -- a fresh line is created at the stamp and the editor shows the wrong one",
+							spareId, tostring(CM.lineKeyOf[spareId])))
+					end
 					log(string.format("LCREATE: '%s' decoded, %d stop(s) (strict: created at the stamp here too)",
 						CM.unescName(nameTok), #stops))
 					-- the colour stays EXACT (%.9g): the line editor colours the NEXT new line by
@@ -1442,12 +1475,19 @@ function CM.pollInject()
 									log("LUPDATE: merge failed (" .. tostring(mS) .. ") -- shipping the click as captured")
 								end
 							end
+							-- a line no vehicle runs: applied here now, everyone else at the stamp
+							-- (lines.lua CM.lineApplyNow); armed 0 = "ran natively here" to execLine
+							local free = armed == 1 and (K.LINE_EDIT_FREE or 1) == 1 and CM.lineHasVehicles and not CM.lineHasVehicles(lid)
 							log(string.format("LUPDATE: %s decoded, %d stop(s), wait %g%s", lk, #stops, wait,
-								armed == 1 and " (strict)" or ""))
+								free and " (no vehicles: applied here now, the others at the stamp)" or (armed == 1 and " (strict)" or "")))
 							CM.scheduleLocal("LUPDATE", { key = lk, name = snap.name or "", color = snap.color or "0.9,0.2,0.2",
 							                           wait = wait, stops = newStops,
-							                           alts = newAlts, armed = armed })
+							                           alts = newAlts, armed = free and 0 or armed })
 							if CM.noteLineSent then CM.noteLineSent(lk, newStops, newAlts) end
+							if free then
+								local okA, errA = pcall(CM.lineApplyNow, lid, { key = lk, wait = wait, stops = newStops, alts = newAlts })
+								if not okA then log("LUPDATE: applying here now failed (" .. tostring(errA) .. ") -- it lands at the stamp with the others") end
+							end
 						end
 					else
 						-- The update ran natively here and the engine applies it on a later

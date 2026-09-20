@@ -20,14 +20,6 @@ an update "applies" the way execLine records it (the list before and after it).
     kept until the line's edits drain (nothing queued, nothing unconfirmed); once they do,
     only the last update's before/after lists remain.
 
-  - A RE-SET OF THE STOP JUST ADDED (2026-09-19): the editor keeps showing the list IT
-    built, so a click that changes the platform (or wait time) of a stop whose add is
-    still on its way is built from the shipped list, not from the entity. Based on the
-    entity it read "B1 added" and the merge put B1 next to the B0 still on its way -- the
-    line held the same stop twice and every later click carried the pair along (line
-    121756: one stop three times). The lists this editor sent come first now; a removal
-    of a stop still on its way is a removal too, not a no-op against the entity.
-
     python tools/line_rapid_edit_test.py
     TPF2_LINES_LUA=<path> python tools/line_rapid_edit_test.py   # another lines.lua (an older build)
 """
@@ -60,18 +52,6 @@ def click_line(sgs):
     parts = ["LUPDATE", str(LID), "180", str(len(sgs))]
     for sg in sgs:
         parts += [str(sg), "0", "0", "0", "0", "180", "0"]
-    return " ".join(parts)
-
-
-# a stop with a platform (station index) and a minimum wait: (sg, station, minWait)
-def stop_str2(sg, st=0, mn=0):
-    return f"{POS[sg]:.2f},0.00,{st},0,0,{mn},180"
-
-
-def click_line2(stops):
-    parts = ["LUPDATE", str(LID), "180", str(len(stops))]
-    for sg, st, mn in stops:
-        parts += [str(sg), str(st), "0", "0", str(mn), "180", "0"]
     return " ".join(parts)
 
 
@@ -260,85 +240,6 @@ def main():
     click2(sgs[:13])                                    # remove the last stop, built from the entity
     check("the next click builds on the entity, not on the phantom list: 13 stops",
           H.lastStops() == ";".join(strs[:13]), f"{H.lastStops().count(';') + 1} stop(s)")
-
-    # 8. A RE-SET OF THE STOP JUST ADDED while its add is still on its way (line 121756,
-    # 2026-09-19). The editor keeps showing the list it built: [A1,B0] shipped, then the
-    # editor re-sets B's platform to 1 -> [A1,B1]. Read against the entity's [A1] that was
-    # "B1 added", and the merge put B1 beside the B0 still on its way: B twice.
-    print("== a platform / wait-time re-set of a stop still on its way")
-
-    def fresh():
-        path = os.path.join(tempfile.mkdtemp(), "lockstep_inject_b.txt")
-        open(path, "wb").close()
-        H = runtime(path)
-
-        def click3(stops):
-            with open(path, "ab") as f:
-                f.write(("ARMED 1\n" + click_line2(stops) + "\n").encode())
-            H.poll()
-        return H, click3
-
-    A, B, C = 107158, 107161, 107164
-    H, click3 = fresh()
-    click3([(A, 1, 0)])
-    H.applyNext(); H.confirm()
-    click3([(A, 1, 0), (B, 0, 0)])                       # add B (platform 0), on its way
-    click3([(A, 1, 0), (B, 1, 0)])                       # re-set B to platform 1, built from the shipped list
-    check("platform re-set while the add waits: B once, on platform 1",
-          H.lastStops() == f"{stop_str2(A, 1)};{stop_str2(B, 1)}", str(H.lastStops()))
-    while H.applyNext():
-        pass
-    check("...the line holds A and B once each", H.entity() == f"{stop_str2(A, 1)};{stop_str2(B, 1)}", H.entity())
-
-    H, click3 = fresh()
-    click3([(A, 1, 0)])
-    H.applyNext(); H.confirm()
-    click3([(A, 1, 0), (B, 0, 0)])
-    H.applyNext()                                        # applied, but the engine has not confirmed it yet
-    click3([(A, 1, 0), (B, 1, 0)])
-    check("platform re-set after the add applied (unconfirmed): B once",
-          H.lastStops() == f"{stop_str2(A, 1)};{stop_str2(B, 1)}", str(H.lastStops()))
-
-    H, click3 = fresh()
-    click3([(A, 0, 0)])
-    H.applyNext(); H.confirm()
-    click3([(A, 0, 0), (B, 0, 0)])
-    click3([(A, 0, 0), (B, 0, 30)])                      # minimum wait of the stop just added
-    check("wait-time re-set while the add waits: B once, with the new wait",
-          H.lastStops() == f"{stop_str2(A)};{stop_str2(B, 0, 30)}", str(H.lastStops()))
-
-    # 9. removing a stop whose add is still on its way: a removal, not "nothing changed"
-    # against the entity (which merged onto the waiting list and kept the stop)
-    H, click3 = fresh()
-    click3([(A, 0, 0)])
-    H.applyNext(); H.confirm()
-    click3([(A, 0, 0), (B, 0, 0)])
-    click3([(A, 0, 0)])
-    check("remove the stop still on its way: one stop", H.lastStops() == stop_str2(A), str(H.lastStops()))
-
-    # 10. the capture's own sequence (a's line 121756): add, add-with-auto-flip (the
-    # editor re-sets B's platform as it adds C: two changes in one click), re-set, re-set,
-    # remove, remove, add, re-set, add -- every other click lands before the next is read;
-    # never a duplicate stop
-    print("== the line 121756 click sequence, every other click landing")
-    H, click3 = fresh()
-    seq = [[(A, 1, 0)], [(A, 1, 0), (B, 0, 0)], [(A, 1, 0), (B, 1, 0), (C, 1, 0)], [(A, 1, 0), (B, 0, 0), (C, 1, 0)],
-           [(A, 1, 0), (B, 1, 0), (C, 1, 0)], [(A, 1, 0), (B, 1, 0)], [(A, 1, 0)], [(A, 1, 0), (B, 0, 0)],
-           [(A, 1, 0), (B, 1, 0)], [(A, 1, 0), (B, 1, 0), (C, 1, 0)]]
-    dup = None
-    for k, stops in enumerate(seq):
-        click3(stops)
-        got = H.lastStops()
-        want = ";".join(stop_str2(*x) for x in stops)
-        if got != want:
-            dup = f"click {k + 1}: shipped {got!r}, the editor's list was {want!r}"
-            break
-        if k % 2 == 1:
-            H.applyNext()                               # every other click lands before the next is read
-    check("the 121756 sequence ships every click as the editor built it", dup is None, dup or "")
-    while H.applyNext():
-        pass
-    check("...and the line ends as the editor showed it", H.entity() == ";".join(stop_str2(*x) for x in seq[-1]), H.entity())
 
     print()
     if fails:

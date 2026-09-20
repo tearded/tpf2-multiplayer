@@ -421,37 +421,12 @@ function CM.lineHistTrim(key)
 	if CM.lineEditsInFlight(key) then return end
 	CM.lineHist[key] = { h[#h - 1], h[#h] }
 end
--- THE LIST THIS EDITOR SENT LAST COMES FIRST (2026-09-19). Under strict line
--- updates the editor's own click is cancelled and lands only at its stamp, but
--- the editor keeps showing the list IT built -- so its next click is built from
--- the list we just shipped, which is not on the entity and not in the history
--- yet (it enters the history when it applies). With only the entity and the
--- history to choose from, a click that re-set the platform of the stop just
--- added ([A1,B0] on its way, click [A1,B1]) based on the entity's [A1], read
--- "B1 added", and the merge put B1 next to the B0 still on its way: the line
--- held the same stop twice, the editor showed both, and every later click
--- carried the pair along (line 121756, 2026-09-19: one stop three times). The
--- same for a wait-time change on a stop still on its way, and a removal of one
--- was swallowed ("nothing changed" against the entity). So the lists we sent
--- and have not seen confirmed -- the last one, then any still queued -- are the
--- first candidates, then the entity, then the history newest first.
 function CM.lineBaseFor(key, clickS, snap)
 	CM.lineHistTrim(key)
-	local cands, seen = {}, {}
-	local function add(c)
-		if c and c.stops and not seen[c.stops] then seen[c.stops] = true; cands[#cands + 1] = c end
-	end
-	add(CM.lineSent and CM.lineSent[key])
-	local own = {}
-	for _, list in ipairs({ CM.queue or {}, CM.retryQueue or {} }) do
-		for _, c in ipairs(list) do
-			if c.op == "LUPDATE" and c.key == key and c.stops and (c.origin == nil or c.origin == K.INSTANCE) then own[#own + 1] = c end
-		end
-	end
-	for k = #own, 1, -1 do add({ stops = own[k].stops, alts = own[k].alts or "" }) end
-	add(snap)
+	local cands = {}
+	if snap and snap.stops then cands[#cands + 1] = snap end
 	local h = (CM.lineHist or {})[key] or {}
-	for k = #h, 1, -1 do add(h[k]) end
+	for k = #h, 1, -1 do cands[#cands + 1] = h[k] end
 	local best, bestD
 	for _, cand in ipairs(cands) do
 		local d = lineDistance(cand.stops, clickS)

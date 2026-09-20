@@ -14,7 +14,7 @@ Landkarte darüber.
 | Fork | `tearded/tpf2-multiplayer`, Arbeitsbranch `codex/vehicle-name-sync` |
 | Letzter Upstream-Merge | 325b879 (Upstream 0.6.1.9, 2026-09-20), davor 0.6.1.1 |
 | Letzte Fork-Auslieferung | 0.6.2.8 aus 60e404d (vor dem Merge), Kanal **Mein Fork** im Launcher |
-| Nächste Auslieferung | 0.6.2.9 = Merge-Stand plus Linienhalte-Fix, noch nicht gebaut |
+| Nächste Auslieferung | 0.6.2.9 = Merge-Stand mit beschlossenem Funktionsumfang, noch nicht gebaut |
 | Umfang der Abweichung | 77 Dateien, rund 4500 Fork-Zeilen: 15 Lua-Dateien der Mod, 3 native Dateien, CI/Release-Werkzeuge, 20 Fork-Releasehinweise |
 
 ## Versionierung und Kanäle
@@ -28,6 +28,27 @@ Landkarte darüber.
   Der Launcher folgt dem Latest-Release des Forks, nicht dem neuesten Commit.
 - Ein Release-Stand muss vollständig committet sein. Der Linienhalte-Fix lag
   vom 19.09. bis 20.09. uncommittet und war deshalb in 0.6.2.8 nicht enthalten.
+
+## Beschlossener Funktionsumfang (2026-09-20)
+
+Der Fork ist Upstream plus genau diese Liste. Alles andere wird nicht mitgeführt;
+wer etwas Neues braucht, trägt es hier ein.
+
+| Nr. | Feature | Entscheidung |
+|---|---|---|
+| A | Auslieferung: Workflow, Release-Skripte, Testgruppen, Fork-Versionierung | drin, Pflicht für den Launcher-Kanal |
+| 5 | Kartennavigation (Ping, Gehe zu, Fenster-Hotkey) | drin |
+| 6 | Spielstandauswahl im Host-Lobbyfenster | drin |
+| 7 | Resync | vollständig Upstream (PR #4), kein Fork-Rest mehr |
+| 8 | Bestätigungstöne | drin, weil mit 12 in einem PR-#6-Commit verwachsen; bei Bedarf trennbar |
+| 9–14 | Fences, Depotkauf, Straßeneigentum, Linienhalt-Wahl, Parameter-Zeilenumbrüche, recycelte IDs | drin, PR #6 offen |
+| 15 | Fahrzeugname reist mit (VNAME) | drin |
+| 16 | Fahrzeug-Stopp repliziert (VSTOP) | drin |
+| 17 | Stationsstraßen-Anschluss nativ | drin |
+| 18 | Linienklick-Basis (`lineBaseFor`) | **raus**, Revert 6dd70a6; Upstream 0.6.1.9 löst die Ursache. Zurückholen nur, wenn im Spiel weiter Halte doppelt erscheinen |
+| 19 | AutoSig2-Kompatibilität | drin |
+| 20 | luacheck überspringt Langstrings | drin, sonst fällt die CI über Upstreams Workshop-Datei |
+| 21 | Natives Vorschau-Rendering | entfällt, Upstream baut die Vorschau selbst; kein Fork-Code mehr |
 
 ## Was der Fork gegenüber dem Original enthält
 
@@ -50,9 +71,8 @@ Rest), **Kandidat** = sollte als PR nach Upstream, sobald spielgetestet.
 | Bestätigungstöne für abgefangene Fahrzeugaktionen | `action_sounds.lua`, `lockstep.lua` | `action_sounds_test` | PR offen (#6) |
 | AutoSig2 automatische Signale als strict Follow-up | `autosig_compat.lua`, `mod.lua` | `autosig_compat_test` | fork (Mod-Kompatibilität, Upstream-Interesse unklar) |
 | Kartennavigation: Ping Ctrl+Shift+P, „Gehe zu", Fenster Ctrl+Shift+D | `navigation.lua`, `menu_hook.cpp` | `navigation_test` | fork |
-| Linienklick baut auf der zuletzt gesendeten Liste auf (`lineBaseFor`) | `lines.lua` | `line_rapid_edit_test` | Kandidat, Spieltest offen |
-| Geführter Resync im Multiplayer-Fenster, Host-geführt, Desync-Berichte je Welt | `resync.lua`, `menu_hook.cpp` | `resync_test`, Recovery-Matrix | PR gemergt (#4), Fensterintegration fork |
-| Gemeinsame Bauvorschauen Straße/Schiene | `previews.lua`, `tpf2_previews.dll` | `preview_test`, `preview_perf_test` | PR gemergt (#3), optionales natives Rendering fork |
+| Host-geführter Resync mit Bereitschaftsprüfung | `resync.lua`, `menu_hook.cpp` | `resync_test`, Recovery-Matrix | PR gemergt (#4), vollständig Upstream |
+| Gemeinsame Bauvorschauen Straße/Schiene | `previews.lua`, `tpf2_previews.dll` | `preview_test`, `preview_perf_test` | PR gemergt (#3), vollständig Upstream; Fork ergänzt nur die Fences-Vorschau |
 | Bahnübergänge, Abriss, Straßen unter Brücken | `roads.lua`, `cons.lua` | `crossing_replay_test`, `bridge_companion_test` | PR gemergt (#2) |
 
 ### Nativ (`native/src`)
@@ -62,7 +82,7 @@ Rest), **Kandidat** = sollte als PR nach Upstream, sobald spielgetestet.
 | Stationsstraßen-Anschluss: Vorlagensegmente über `segmentsBefore`, loses Vorlagenende auf den versandten Splitknoten, Frozen-Index umschreiben | `slice_hook.cpp` (MergeTemplateStreet), `station_weld.h` | Kandidat, Spieltest offen (0.6.2.8) |
 | `VSTOP` Factory-Hook | `slice_hook.cpp` | Kandidat (siehe oben) |
 | Spielstandauswahl im Host-Lobbyfenster (SELECT SAVE, NEXT/PREVIOUS, REFRESH) | `menu_hook.cpp`, `tools/lobby_save_picker_test.cpp` | fork |
-| Navigation und Resync im Multiplayer-Fenster | `menu_hook.cpp` | fork |
+| Navigation im Multiplayer-Fenster (Ping-Liste, Gehe-zu-Knöpfe) | `menu_hook.cpp` | fork |
 
 ### Build, Test und Auslieferung (bleibt Fork-eigen)
 
@@ -111,10 +131,12 @@ Launcher und CI gehören nie in eine Upstream-PR.
    ist ein PR-Kandidat, sobald er im gemeinsamen Spiel bestätigt ist. PR-Branch
    auf Upstream-`main` aufsetzen, nur die Sachänderung plus Test, keine Versions-,
    Launcher- oder CI-Dateien. Reihenfolge nach Spieltest: VSTOP, VNAME,
-   Stationsstraßen-Weld, Linienklick-Basis, luacheck.
+   Stationsstraßen-Weld, luacheck.
 4. **Fork-eigen bleibt:** Launcher-Kanal, CI/Release-Pipeline, Testgruppen,
-   Navigation, Spielstandauswahl, Fensterintegration des Resync, Mod-Kompatibilität
-   (AutoSig2, Fences bis Upstream sie nimmt).
+   Navigation, Spielstandauswahl, Mod-Kompatibilität (AutoSig2, Fences bis
+   Upstream sie nimmt). Neue Features nur mit Eintrag im beschlossenen
+   Funktionsumfang; Upstream-Verhalten hat im Zweifel Vorrang vor einer
+   Fork-Variante desselben Fixes.
 5. **Jede Fork-Änderung hat einen Offline-Test** in `tools/` und steht in der
    Logikgruppe von `tools/run_release_tests.py`. Upstream-Tests werden beim Merge
    dort ebenfalls eingetragen.
@@ -131,9 +153,10 @@ Launcher und CI gehören nie in eine Upstream-PR.
   Depot an Spielerstraße, großer Bahnhof mit Straßenanschluss (`tpf2_slice.log`:
   „[merge] done" / „[merge-weld] done"), Zug stoppen (`VSTOP`), Zäune ziehen.
 - Linienbearbeitung: im ausgelieferten 0.6.2.8 ist kein Linien-Fix enthalten.
-  Der Merge-Stand kombiniert Upstreams Ansatz (Halt = Stationsgruppe, Klicks auf
-  Linien ohne Fahrzeuge sofort lokal, vorab erzeugte Ersatzlinie für „Neue Linie")
-  mit der Fork-Kandidatenreihenfolge in `lineBaseFor`. Ungetestet im Spiel.
+  Der Branch trägt jetzt Upstreams Lösung unverändert (Halt = Stationsgruppe,
+  Klicks auf Linien ohne Fahrzeuge sofort lokal, vorab erzeugte Ersatzlinie für
+  „Neue Linie"). Im Spiel prüfen: Halte schnell hinzufügen, Bahnsteig umsetzen,
+  „Neue Linie" öffnet sofort.
 - Gleisbau-Fehlschläge von Mitspieler b (`critical=true` ohne Meldung, Tunnelhälften
   und Bahnübergang mit zwei Splits) ohne b-stdout nicht belegt.
 - Peer-Drop während laufender Wiederherstellungsrunde und Hold-Abbruch bei

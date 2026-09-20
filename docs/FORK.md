@@ -49,6 +49,7 @@ wer etwas Neues braucht, trägt es hier ein.
 | 19 | AutoSig2-Kompatibilität | drin |
 | 20 | luacheck überspringt Langstrings | drin, sonst fällt die CI über Upstreams Workshop-Datei |
 | 21 | Natives Vorschau-Rendering | entfällt, Upstream baut die Vorschau selbst; kein Fork-Code mehr |
+| 22 | Umgedrehte Fahrzeugteile (reversed-Flag) reisen mit dem Kauf (VBUY/VREPL) | drin, Kandidat für Upstream (dort derselbe Platzhalter) |
 
 ## Was der Fork gegenüber dem Original enthält
 
@@ -62,6 +63,7 @@ Rest), **Kandidat** = sollte als PR nach Upstream, sobald spielgetestet.
 |---|---|---|---|
 | Fahrzeugname reist mit dem Kauf (`VNAME`), gegen Zugnamen-Desync bei verschiedenen Spielsprachen | `vehicles.lua`, `inject.lua` | `vehicle_name_sync_test` | Kandidat |
 | Fahrzeug-Stopp-Schalter repliziert (`VSTOP`, nativer Factory-Eintrag id 18) | `vehicles.lua`, `inject.lua`, `lockstep.lua`, `slice_hook.cpp` | `foreign_edit_guard_test`, `vehicle_line_choice_test` | Kandidat |
+| Umgedrehte Fahrzeugteile: reversed-Flag (VehiclePart+0x04) im VBUY/VREPL-Wire, fünftes Feld der Teilespezifikation | `slice_hook.cpp`, `inject.lua`, `vehicles.lua` | `vehicle_reversed_test` | Kandidat |
 | Automatische Linienhalt-Wahl beim Kauf (`-1` probiert Halte der Reihe nach) | `vehicles.lua` | `vehicle_line_choice_test` | PR offen (#6) |
 | Depotkauf bei versetzter Mod-Geometrie (UEP-Terminal) | `vehicles.lua` | `depot_buy_test` | PR offen (#6) |
 | Konstruktionsparameter mit Zeilenumbrüchen | `cons.lua`, `net.lua` | `params_line_test` | PR offen (#6) |

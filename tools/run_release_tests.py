@@ -24,7 +24,7 @@ GROUPS = {
         clone_buy_test action_sounds_test vehicle_line_choice_test depot_buy_test params_line_test fences_compat_test vehicle_name_sync_test
         ser_depth_test crossing_replay_test bridge_companion_test edge_demolition_test track_fresh_test
         delay_hold_test preview_test preview_perf_test speed_vote_test hash_cadence_test hash_bigmap_test
-        version_gate_test mod_download_test lobby_panel_test chat_directory_test vpos_cap_test con_recycled_id_test
+        version_gate_test mod_download_test lobby_panel_test chat_directory_test vpos_cap_test con_recycled_id_test vehicle_reversed_test
         company_carry_test dedicated_mode_test host_capacity_test line_spare_test loading_panel_test test_master_tls test_modshare_paths''',
     'recovery': 'run_recovery_matrix',
 }

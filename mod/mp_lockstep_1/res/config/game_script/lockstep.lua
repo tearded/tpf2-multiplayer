@@ -537,6 +537,11 @@ K.JOURNAL_LOAN = 0
 -- a 30,000,000 loan is several ticks of settling.
 K.LOAN_SETTLE_TICKS = 90
 K.JOURNAL_TRANSFER = 6
+-- Session speed (fork, 2026-09-20): "last" -- the newest speed click by ANY
+-- player sets the session speed, levers 1/2/4 only; "vote" -- upstream's mean
+-- of the players' votes on the quarter grid (pacing.lua). Read by both Lua
+-- states: the game script counts, the GUI state draws the speed row.
+K.SPEED_MODE = "last"
 K.STRICT_OPS = { VREV = true, VSTOP = true, VLINE = true, VSELL = true, VDEPOT = true, VREPL = true, VBUY = true, LCREATE = true, LUPDATE = true, LDELETE = true, LSPARE = true }   -- replay on the originator too, but only when ARMED=1 (the slice cancelled it)
 -- CONX/CONP have no slice cancel (the construction's module params cannot be
 -- read from the proposal); the originator instead deletes its native copy and
@@ -1715,12 +1720,21 @@ function data()
 					-- session speed (CM.guiSpeedSet). Every game counts it at its stamp,
 					-- and the session runs at the mean of the votes the line above the
 					-- buttons lists.
+					-- THE FORK'S "last" MODE (K.SPEED_MODE, 2026-09-20): the newest click
+					-- by anyone sets the session speed, levers only -- the row offers 1, 2
+					-- and 4, and -/+ step along them.
+					local lastMode = K.SPEED_MODE == "last"
 					local function speedVote(v)
-						v = math.max(0.25, math.min(4.5, math.floor(v * 4 + 0.5) / 4))
+						if lastMode then
+							v = (v < 1.5) and 1 or (v < 3) and 2 or 4
+						else
+							v = math.max(0.25, math.min(4.5, math.floor(v * 4 + 0.5) / 4))
+						end
 						D.speedAsked, D.speedAskedAt = v, os.time()
 						local f = io.open(K.BASE .. "lockstep_inject_" .. (K.INSTANCE or "a") .. ".txt", "a")
 						if f then f:write(string.format("SPEEDSET %g", v) .. string.char(10)); f:close() end
-						pcall(function() D.speedText:setText(string.format("your vote: %gx -- the session speed follows in a moment   ", v)) end)
+						pcall(function() D.speedText:setText(string.format(lastMode and "your speed: %gx -- the session follows in a moment   "
+							or "your vote: %gx -- the session speed follows in a moment   ", v)) end)
 					end
 					-- -/+0.25 steps our own vote: the last press for a few seconds (the
 					-- dash file lags a press by a second or two), then the vote it reports
@@ -1732,12 +1746,20 @@ function data()
 					D.speedText = api.gui.comp.TextView.new("session speed: -   ")
 					svCol:addItem(D.speedText)
 					local hsRow = api.gui.layout.BoxLayout.new("HORIZONTAL")
-					hsRow:addItem(api.gui.comp.TextView.new("your vote:   "))
-					hsRow:addItem(toggleBtn("  -0.25  ", function() speedVote(speedVoteBase() - 0.25) end))
-					for _, sv in ipairs({ 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5 }) do
-						hsRow:addItem(toggleBtn(string.format("  %g  ", sv), function() speedVote(sv) end))
+					hsRow:addItem(api.gui.comp.TextView.new(lastMode and "session speed:   " or "your vote:   "))
+					if lastMode then
+						hsRow:addItem(toggleBtn("  slower  ", function() speedVote(speedVoteBase() / 2) end))
+						for _, sv in ipairs({ 1, 2, 4 }) do
+							hsRow:addItem(toggleBtn(string.format("  %gx  ", sv), function() speedVote(sv) end))
+						end
+						hsRow:addItem(toggleBtn("  faster  ", function() speedVote(speedVoteBase() * 2) end))
+					else
+						hsRow:addItem(toggleBtn("  -0.25  ", function() speedVote(speedVoteBase() - 0.25) end))
+						for _, sv in ipairs({ 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5 }) do
+							hsRow:addItem(toggleBtn(string.format("  %g  ", sv), function() speedVote(sv) end))
+						end
+						hsRow:addItem(toggleBtn("  +0.25  ", function() speedVote(speedVoteBase() + 0.25) end))
 					end
-					hsRow:addItem(toggleBtn("  +0.25  ", function() speedVote(speedVoteBase() + 0.25) end))
 					local hsRowC = api.gui.comp.Component.new("mpSpeedVoteButtons")
 					hsRowC:setLayout(hsRow)
 					svCol:addItem(hsRowC)
@@ -2112,7 +2134,8 @@ function data()
 							if not (D.speedAsked and os.time() - (D.speedAskedAt or 0) <= 5) then
 								local sp = (D.speedEff == 0 and "paused") or (D.speedEff and string.format("%gx", D.speedEff)) or "-"
 								if mine.speedreq and mine.speedreq ~= "-" then sp = sp .. " (/speed in the chat)" end
-								local votes = (mine.votes and mine.votes ~= "") and ("   |   votes: " .. mine.votes) or ""
+								local label = (K.SPEED_MODE == "last") and "   |   last click wins; clicks: " or "   |   votes: "
+								local votes = (mine.votes and mine.votes ~= "") and (label .. mine.votes) or ""
 								D.speedText:setText("session speed: " .. sp .. votes .. "   ")
 							end
 						end

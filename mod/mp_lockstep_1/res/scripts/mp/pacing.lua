@@ -134,10 +134,26 @@ K.VOTE_PRESENT_TICKS = 160   -- ~30 s without a heartbeat: that player's vote st
 K.VOTE_MIN, K.VOTE_MAX = 0.25, 8
 CM.speedVotes = {}           -- letter -> { v =, ct = (game time of the click), seq =, at = (the stamp) }
 
--- A speed as a vote: the speed row's quarter grid, 0.25..8.
+-- THE FORK'S SPEED MODE (2026-09-20, user): "last" -- the newest click by any
+-- player sets the session speed, and only the game's own levers (1, 2, 4)
+-- can be chosen, so the dither never runs. "vote" is upstream's mean of the
+-- votes on the quarter grid. The votes are still recorded and shipped the
+-- same way in both modes (SPEEDVOTE at the stamp, LSEFF with vt=); only what
+-- the leader makes of them differs (CM.voteSpeed), and what a click snaps to.
+K.SPEED_MODE = K.SPEED_MODE or "last"
+K.SPEED_LEVERS = { 1, 2, 4 }
+function CM.speedLever(v)
+	v = tonumber(v) or 1
+	if v < 1.5 then return 1 elseif v < 3 then return 2 end
+	return 4
+end
+
+-- A speed as a vote: the speed row's quarter grid, 0.25..8 ("vote"), or the
+-- nearest lever ("last").
 function CM.voteValue(v)
 	v = tonumber(v)
 	if not v then return nil end
+	if K.SPEED_MODE == "last" then return CM.speedLever(v) end
 	v = math.floor(v * 4 + 0.5) / 4
 	if v < K.VOTE_MIN then v = K.VOTE_MIN elseif v > K.VOTE_MAX then v = K.VOTE_MAX end
 	return v
@@ -199,17 +215,18 @@ function CM.votesCounted()
 	local mine, cast = CM.speedVotes[me], CM.myVoteCast
 	if cast and (not mine or cast.ct > mine.ct) then mine = cast end
 	if mine and not CM.dedicated then
-		list[#list + 1] = { letter = me, v = mine.v }
+		list[#list + 1] = { letter = me, v = mine.v, ct = mine.ct, seq = mine.seq or 0 }
 	elseif not CM.dedicated then
 		local own = ((CM.myCeiling or 0) > 0) and CM.myCeiling or CM.ceilBeforePause
-		if own and own > 0 then list[#list + 1] = { letter = me, v = CM.voteValue(own), own = true } end
+		-- ct = -1: the leader's own speed is older than any click ("last" mode)
+		if own and own > 0 then list[#list + 1] = { letter = me, v = CM.voteValue(own), own = true, ct = -1, seq = 0 } end
 	end
 	-- A DEDICATED SERVER (2026-09-18, user) has no vote and no own speed in the
 	-- mean: the players' votes are the session speed; with none cast yet, 1x.
 	for letter, vote in pairs(CM.speedVotes) do
 		local pr = CM.peers[letter]
 		if letter ~= me and pr and pr.at and (CM.ticks - pr.at) <= K.VOTE_PRESENT_TICKS then
-			list[#list + 1] = { letter = letter, v = vote.v }
+			list[#list + 1] = { letter = letter, v = vote.v, ct = vote.ct, seq = vote.seq or 0 }
 		end
 	end
 	table.sort(list, function(x, y) return x.letter < y.letter end)
@@ -220,16 +237,22 @@ end
 -- grid; an integer over 20 is the same double a joiner parses back from LSEFF),
 -- the wire form of what was counted ("a:4*,b:1", * = the leader's own speed, not
 -- a vote), and how many. nil when nothing counts.
+-- In "last" mode (K.SPEED_MODE) the speed is the newest click among what was
+-- counted (CM.voteIsNewer's order: the click's game time, then seq), a lever.
 function CM.voteSpeed()
 	local list = CM.votesCounted()
 	if #list == 0 then
 		if CM.dedicated and CM.othersPresent and CM.othersPresent() then return 1, "", 0 end   -- players in, nobody voted yet
 		return nil, "", 0
 	end
-	local sum, parts = 0, {}
+	local sum, parts, newest = 0, {}, nil
 	for i, e in ipairs(list) do
 		sum = sum + e.v
 		parts[i] = string.format("%s:%g%s", e.letter, e.v, e.own and "*" or "")
+		if CM.voteIsNewer(newest, e.ct or -1, e.seq or 0) then newest = e end
+	end
+	if K.SPEED_MODE == "last" then
+		return CM.speedLever(newest and newest.v or 1), table.concat(parts, ","), #list
 	end
 	local avg = math.floor(sum / #list * 20 + 0.5) / 20
 	if avg < K.VOTE_MIN then avg = K.VOTE_MIN elseif avg > K.VOTE_MAX then avg = K.VOTE_MAX end

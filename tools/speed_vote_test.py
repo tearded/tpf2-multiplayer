@@ -42,8 +42,10 @@ game = { interface = { getGameSpeed = function() return SPEED end } }
 api = { cmd = { make = { setGameSpeed = function(v) return { speed = v } end },
                 sendCommand = function(c) SPEED = c.speed end } }
 
-function newCM(letter)
-  local K = { INSTANCE = letter, BASE = "mem://" .. letter .. "/", SIM_STEP = 0.2, PEER_STALE_TICKS = 25, EXEC_DELAY = 0.4 }
+function newCM(letter, mode)
+  -- mode: "vote" (upstream's mean, what the checks below were written for) or the fork's "last"
+  local K = { INSTANCE = letter, BASE = "mem://" .. letter .. "/", SIM_STEP = 0.2, PEER_STALE_TICKS = 25, EXEC_DELAY = 0.4,
+              SPEED_MODE = mode or "vote" }
   local CM = { peers = {}, ticks = 0, leader = "a", seqNo = 0, cfgCache = {} }
   CM.isLeader = function() return K.INSTANCE == (CM.leader or "a") end
   CM.leaderPrecise = function() return nil end
@@ -224,6 +226,38 @@ a.speedButton(0, 'toggle')
 a.ticks = a.ticks + 1
 a.paceV2(G.NOW)
 check('the host\'s pause: session speed 0, the votes still listed', a.effSpeed == 0 and G.lastSent() == 'LSEFF v=0 vt=a:4*,b:1,c:2')
+
+print('== the fork\'s "last" mode: the newest click by anyone sets the speed, levers only')
+G.CMDS, G.SENT = lua.table(), lua.table()
+G.SPEED = 4
+G.FS['mem://a/tpf2_bridge_ctl.txt'] = None   # the /speed 3 of the section above is not this session's
+a, _ = G.newCM('a', 'last')
+check('a click snaps to the nearest lever: 1.25 -> 1, 1.5 -> 2, 2.9 -> 2, 3 -> 4, 8 -> 4',
+      a.voteValue(1.25) == 1 and a.voteValue(1.5) == 2 and a.voteValue(2.9) == 2 and a.voteValue(3) == 4 and a.voteValue(8) == 4)
+a.peerSeen, a.myCeiling, a.lastSetSpeed, a.paceApplied = True, 4, 4, True
+a.ticks = 100
+G.heard(a, 'b'); G.heard(a, 'c')
+v, vt, n = a.voteSpeed()
+check('before anyone clicks: the host\'s own speed', v == 4 and vt == 'a:4*')
+G.vote(a, 'b', 1, 10.0, 1)
+v, vt, n = a.voteSpeed()
+check('b clicks 1x: the session is 1x, not the mean 2.5; everyone still listed', v == 1 and vt == 'a:4*,b:1')
+G.vote(a, 'c', 2, 11.0, 1)
+check('c clicks 2x later: 2x', a.voteSpeed()[0] == 2)
+G.vote(a, 'b', 4, 10.5, 2)
+check('an older click of b\'s stamped late does not take over', a.voteSpeed()[0] == 2 and a.speedVotes.b.v == 4)
+a.paceV2(G.NOW)
+check('the leader runs the session at the newest click, a lever, no fraction file',
+      a.effSpeed == 2 and G.lastSent() == 'LSEFF v=2 vt=a:4*,b:4,c:2' and G.SPEED == 2 and G.FS['mem://a/tpf2_speed.txt'] is None)
+G.NOW = 1020
+a.speedButton(4, 'button')
+v, vt, n = a.voteSpeed()
+check('the host\'s own click is the newest: 4x, counted at once', v == 4 and vt == 'a:4,b:4,c:2')
+G.NOW = 1030
+G.vote(a, 'c', 1.75, 1030.0, 2)
+check('a quarter-grid vote from the wire snaps to a lever too: 1.75 -> 2', a.voteSpeed()[0] == 2)
+a.ticks = a.ticks + 200
+check('a player silent for too long stops counting; the newest of the rest wins', a.voteSpeed()[1] == 'a:4' and a.voteSpeed()[0] == 4)
 
 print('SPEED VOTES:', 'all checks passed' if failures == 0 else '%d check(s) failed' % failures)
 raise SystemExit(1 if failures else 0)

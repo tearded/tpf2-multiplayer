@@ -120,11 +120,19 @@ buttons toggle three sections:
   **numbers** shows the raw counters (game times, skew, apply lag, drift, balance) for debugging.
 - **chat** (shown): the last lines of the lobby chat, and a **say:** field (Enter sends).
 - **companies** (hidden at first): see [Companies](#companies).
-- **speed** (shown): your speed vote (1 to 4.5, and -0.25 / +0.25 from your last vote), with the
-  session speed and the votes it is the average of. See [Speed and pause](#speed-and-pause).
+- **speed** (shown): the session speed with **1x / 2x / 4x** and **slower / faster** buttons, and
+  the last click of every player. See [Speed and pause](#speed-and-pause).
 
 ### Speed and pause
 
+- **This fork: the last click wins.** Any player's speed button, in the game's own clock or in the
+  Multiplayer window's speed row, sets the session speed for everyone, and only the game's own
+  speeds 1x, 2x and 4x can be chosen. Your click does not change your game's speed by itself: it
+  is cancelled, every game records it at the same moment, and the whole session then runs at the
+  newest click. The row shows whose click set it. Pausing stays the host's alone (below), and
+  `/speed` in the chat still overrides until the next click.
+- Upstream's original rule, kept in the code as `K.SPEED_MODE = "vote"` (lockstep.lua), is what
+  the rest of this section describes:
 - **The session runs at the average of everyone's speed votes.** Pressing a speed button, in the
   game's own clock or in the Multiplayer window's speed row, is your vote. It does not change your
   game's speed by itself: the click is cancelled, every game records your vote at the same moment,

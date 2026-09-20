@@ -13,8 +13,8 @@ Landkarte darüber.
 | Original (Upstream) | `silver2127/tpf2-multiplayer`, `main` 5783d4d = Release 0.6.1.9 |
 | Fork | `tearded/tpf2-multiplayer`, Arbeitsbranch `codex/vehicle-name-sync` |
 | Letzter Upstream-Merge | 325b879 (Upstream 0.6.1.9, 2026-09-20), davor 0.6.1.1 |
-| Letzte Fork-Auslieferung | 0.6.2.8 aus 60e404d (vor dem Merge), Kanal **Mein Fork** im Launcher |
-| Nächste Auslieferung | 0.6.2.9 = Merge-Stand mit beschlossenem Funktionsumfang, noch nicht gebaut |
+| Letzte Fork-Auslieferung | 0.6.2.9 aus b10fe82 (Merge-Stand, reversed-Flag), Kanal **Mein Fork** im Launcher |
+| Nächste Auslieferung | 0.6.2.10 = 0.6.2.9 plus Geschwindigkeitsmodus „letzter Klick" |
 | Umfang der Abweichung | 77 Dateien, rund 4500 Fork-Zeilen: 15 Lua-Dateien der Mod, 3 native Dateien, CI/Release-Werkzeuge, 20 Fork-Releasehinweise |
 
 ## Versionierung und Kanäle
@@ -50,6 +50,7 @@ wer etwas Neues braucht, trägt es hier ein.
 | 20 | luacheck überspringt Langstrings | drin, sonst fällt die CI über Upstreams Workshop-Datei |
 | 21 | Natives Vorschau-Rendering | entfällt, Upstream baut die Vorschau selbst; kein Fork-Code mehr |
 | 22 | Umgedrehte Fahrzeugteile (reversed-Flag) reisen mit dem Kauf (VBUY/VREPL) | drin, Kandidat für Upstream (dort derselbe Platzhalter) |
+| 23 | Spielgeschwindigkeit: letzter Klick eines beliebigen Spielers gewinnt, nur 1x/2x/4x (`K.SPEED_MODE = "last"`); Upstreams Vote-Mittel bleibt als `"vote"` im Code | drin, fork-eigen (bewusste Abweichung, Benutzerwunsch 2026-09-20) |
 
 ## Was der Fork gegenüber dem Original enthält
 
@@ -72,6 +73,7 @@ Rest), **Kandidat** = sollte als PR nach Upstream, sobald spielgetestet.
 | Snowball Fences / Hecken als `FENCE`-Befehl, ganze Zäune, Abriss | `fences_compat.lua`, `mod.lua`, `previews.lua` | `fences_compat_test` | PR offen (#6) |
 | Bestätigungstöne für abgefangene Fahrzeugaktionen | `action_sounds.lua`, `lockstep.lua` | `action_sounds_test` | PR offen (#6) |
 | AutoSig2 automatische Signale als strict Follow-up | `autosig_compat.lua`, `mod.lua` | `autosig_compat_test` | fork (Mod-Kompatibilität, Upstream-Interesse unklar) |
+| Spielgeschwindigkeit „letzter Klick gewinnt", Stufen 1/2/4 statt Vote-Mittel mit Bruchwerten | `pacing.lua`, `lockstep.lua` (Schalter `K.SPEED_MODE`, Geschwindigkeitszeile) | `speed_vote_test` | fork |
 | Kartennavigation: Ping Ctrl+Shift+P, „Gehe zu", Fenster Ctrl+Shift+D | `navigation.lua`, `menu_hook.cpp` | `navigation_test` | fork |
 | Host-geführter Resync mit Bereitschaftsprüfung | `resync.lua`, `menu_hook.cpp` | `resync_test`, Recovery-Matrix | PR gemergt (#4), vollständig Upstream |
 | Gemeinsame Bauvorschauen Straße/Schiene | `previews.lua`, `tpf2_previews.dll` | `preview_test`, `preview_perf_test` | PR gemergt (#3), vollständig Upstream; Fork ergänzt nur die Fences-Vorschau |

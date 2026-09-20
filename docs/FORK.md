@@ -13,8 +13,8 @@ Landkarte darüber.
 | Original (Upstream) | `silver2127/tpf2-multiplayer`, `main` 5783d4d = Release 0.6.1.9 |
 | Fork | `tearded/tpf2-multiplayer`, Arbeitsbranch `codex/vehicle-name-sync` |
 | Letzter Upstream-Merge | 325b879 (Upstream 0.6.1.9, 2026-09-20), davor 0.6.1.1 |
-| Letzte Fork-Auslieferung | 0.6.2.9 aus b10fe82 (Merge-Stand, reversed-Flag), Kanal **Mein Fork** im Launcher |
-| Nächste Auslieferung | 0.6.2.10 = 0.6.2.9 plus Geschwindigkeitsmodus „letzter Klick" |
+| Letzte Fork-Auslieferung | 0.6.2.10 aus b184c35 (Merge-Stand, reversed-Flag, Geschwindigkeit „letzter Klick"), Kanal **Mein Fork** im Launcher, 2026-09-20 |
+| Nächste Auslieferung | offen; erst gemeinsamer Spieltest von 0.6.2.10 |
 | Umfang der Abweichung | 77 Dateien, rund 4500 Fork-Zeilen: 15 Lua-Dateien der Mod, 3 native Dateien, CI/Release-Werkzeuge, 20 Fork-Releasehinweise |
 
 ## Versionierung und Kanäle

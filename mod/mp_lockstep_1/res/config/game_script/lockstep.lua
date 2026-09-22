@@ -1,9 +1,3 @@
-if os.getenv("TPF2MP_RELEASE_ROOT") then
-    require("mp/update_bootstrap").setup()
-    local path = os.getenv("TPF2MP_RELEASE_ROOT") .. "/mod/res/scripts/mp/entry.lua"
-    assert(loadfile(path, "t", _ENV))()
-    return
-end
 -- MP Lockstep -- the game-script half of TpF2 Multiplayer (docs/ARCHITECTURE.md).
 --
 -- Replicates COMMANDS, not state. Every command carries the game time at which
@@ -711,8 +705,6 @@ require("mp/fences_compat").bind(CM, K, log)
 -- Lives in res/scripts/mp/stats.lua.
 CM.boot("mp.stats")
 -- ---------- the desync popup: send this game's logs to the developers? (GUI state) ----------
--- Lives in res/scripts/mp/desyncreport.lua.
-CM.boot("mp.desyncreport")
 CM.boot("mp.resync")
 -- ---------- desync check ----------
 function CM.compareAt(stamp)
@@ -1241,7 +1233,7 @@ function data()
 						-- LSTICK table, with a wall clock so a leftover file can be
 						-- told from a live one.
 						f:write("wall=" .. tostring(os.time()) .. "\n")
-						-- the first desync of this game, for the popup (desyncreport.lua)
+						-- the first desync of this game, for the dashboard
 						f:write("boot=" .. tostring(CM.bootWall or 0) .. "\n")
 						f:write("resynctoken=" .. CM.resyncToken .. "\n")
 						if CM.firstDesync then
@@ -1379,6 +1371,7 @@ function data()
 			if CM.dedicatedGui then
 				if guiTick % 300 ~= 0 then return end
 			else
+				if CM.actionSoundsGuiTick then pcall(CM.actionSoundsGuiTick, CM.recoveryGuiHeld()) end
 				-- THE SPARE LINE'S EDITOR, FROM THIS THREAD (lines.lua CM.spareFireWrite,
 				-- 2026-09-19). A New line click opens the editor on a pre-made line the
 				-- game script re-owns to the player on its next tick. The editor's
@@ -1438,7 +1431,6 @@ function data()
 						api.cmd.sendCommand(api.cmd.make.setName(lid, name), function() end)
 					end)
 				end
-				if CM.actionSoundsGuiTick then pcall(CM.actionSoundsGuiTick, CM.recoveryGuiHeld()) end
 				-- other players' cursors (cursors.lua): every frame, so the circles glide; ahead of
 				-- the panel's own twice-a-second refresh
 				if CM.cursorGuiTick then pcall(CM.cursorGuiTick) end
@@ -1454,13 +1446,9 @@ function data()
 				-- differ, and the last few notable events harvested from the log.
 				-- Everything comes from lockstep_dash_<a|b>.txt, written every
 				-- 15 ticks by the game-script state.
-				-- Match the native lobby's process-pinned release directory. Never fall
-				-- back to an older inbox while a release lobby is still starting.
+				-- The lobby's folder: the per-user one when a lobby has run there, else the
+				-- game folder's. Never fall back to an older inbox while a lobby is still starting.
 				function CM.netDir()
-					local okRelease, release = pcall(os.getenv, "TPF2MP_RELEASE_ROOT")
-					if okRelease and release and release ~= "" then
-						return release .. "/netpunch"
-					end
 					if CM.netDirCached then return CM.netDirCached end
 					local cands = {}
 					local ok, la = pcall(os.getenv, "LOCALAPPDATA")
@@ -1572,10 +1560,6 @@ function data()
 				local own = K.INSTANCE or "a"
 				local ownKv = readDash(own)
 				local ownWall = ownKv and tonumber(ownKv.wall) or nil
-				if CM.desyncReportTick then
-					local okR, errR = pcall(CM.desyncReportTick, ownKv)
-					if not okR then print("[ls-gui] desync report: " .. tostring(errR)) end
-				end
 				local peerInfo = {}
 				if ownKv and ownKv.peers and ownKv.peers ~= "-" then
 					for o, pt, sk, vd in ownKv.peers:gmatch("(%a+):([%-%d]+):([%+%-%d%.]+):([^,]+)") do
@@ -1941,10 +1925,7 @@ function data()
 						end
 						D.input:onEnter(function()
 							local t = D.input:getText()
-							if t and #t > 0 then
-								-- "/desynclogs ..." sets the desync popup's choice here and never reaches the chat
-								if not (CM.desyncLogsCommand and CM.desyncLogsCommand(t)) then CM.chatSend(t) end
-							end
+							if t and #t > 0 then CM.chatSend(t) end
 							CM.chatCloseInput()
 						end)
 						pcall(function() D.input:onCancel(function() CM.chatCloseInput() end) end)

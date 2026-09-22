@@ -230,10 +230,6 @@ static bool netDirUsable(const wchar_t* dir)
 static void resolveNetDir(wchar_t* out, int cch)
 {
     wchar_t la[MAX_PATH];
-    if (GetEnvironmentVariableW(L"TPF2MP_RELEASE_ROOT", la, MAX_PATH)) {
-        _snwprintf_s(out, cch, _TRUNCATE, L"%s\\netpunch", la);
-        return;
-    }
     if (GetEnvironmentVariableW(L"LOCALAPPDATA", la, MAX_PATH)) {
         wchar_t cand[MAX_PATH]; _snwprintf_s(cand, _TRUNCATE, L"%s\\tpf2mp\\netpunch", la);
         if (netDirUsable(cand)) { wcscpy_s(out, cch, cand); return; }
@@ -368,8 +364,6 @@ static int g_savePage = 0;
 static const int SAVE_ROWS = 8;
 static void RefreshLobbySaves();
 static volatile LONG  g_panelDirty = 1;       // re-render the GDI content
-static volatile LONG g_updateAvailable = 0, g_updateBusy = 0;
-static void StartUpdateCheck();
 static int            g_panelX = 0, g_panelY = 0;   // top-left on the swapchain
 
 // render resources
@@ -1465,13 +1459,14 @@ static void RenderPanelLayer(int w, int h)
             mwButton(dx+dw-S(20)-bwN,dy+S(175),bwN,S(32),L"CANCEL",17);
         }
         wchar_t wst[256]; MultiByteToWideChar(CP_UTF8, 0, st, -1, wst, 256);
-        HFONT fst = mkLato(S(12)); layerText(pad + bw1 + S(20), bottom, w - 2 * pad - bw1 - rightCut, S(30), wst, fst, mp[0] ? MW_TEXT : MW_DIM, DT_LEFT | DT_VCENTER | DT_SINGLELINE); DeleteObject(fst);
+        // The status sits between LEAVE and the right-hand buttons: a line longer than
+        // that space ends in an ellipsis rather than a hard cut (the mods-round line
+        // with a joiner's name in front ran to the edge, 2026-09-20).
+        HFONT fst = mkLato(S(12)); layerText(pad + bw1 + S(20), bottom, w - 2 * pad - bw1 - rightCut, S(30), wst, fst, mp[0] ? MW_TEXT : MW_DIM, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS); DeleteObject(fst);
     } else {
         // ---------------- HOST / JOIN ----------------
         mwTitle(L"MULTIPLAYER"); mwClose(w, 4);
-        { int lb = mwButtonW(L"OPEN LOGS"); mwButton(w - S(65) - lb, S(10), lb, S(28), L"OPEN LOGS", 15);
-          const wchar_t* label = InterlockedCompareExchange(&g_updateAvailable, 0, 0) ? L"DOWNLOAD UPDATE" : L"CHECK UPDATES";
-          int ub = mwButtonW(label); mwButton(w - S(75) - lb - ub, S(10), ub, S(28), label, 18); }
+        { int lb = mwButtonW(L"OPEN LOGS"); mwButton(w - S(65) - lb, S(10), lb, S(28), L"OPEN LOGS", 15); }
         int colW = (w - 2 * pad - S(40)) / 2, lx = pad, rx = pad + colW + S(40);
         layerRect(pad + colW + S(20), cy, 1, S(130), RGB(255, 255, 255), 40);
         mwHeader(lx, cy, colW, L"HOST A GAME");
@@ -1837,39 +1832,6 @@ static void PollClick()
 
 // OPEN LOGS remains a worker operation; it must not block presentation.
 static volatile LONG g_logsBusy = 0;
-static DWORD WINAPI UpdateThread(LPVOID)
-{
-    wchar_t net[600], data[MAX_PATH], result[600], exe[650], cmd[1600];
-    resolveNetDir(net, 600);
-    if (!Tpf2mpDataDirW(data, MAX_PATH, nullptr)) { InterlockedExchange(&g_updateBusy, 0); return 1; }
-    _snwprintf_s(result, _TRUNCATE, L"%supdate-%lu-%llu.txt", data, GetCurrentProcessId(), GetTickCount64());
-    _snwprintf_s(exe, _TRUNCATE, L"%s\\netpunch.exe", net);
-    bool download = InterlockedCompareExchange(&g_updateAvailable, 0, 0) != 0;
-    _snwprintf_s(cmd, _TRUNCATE, L"\"%s\" --update %s --result \"%s\"", exe, download ? L"download" : L"check", result);
-    DeleteFileW(result);
-    STARTUPINFOW si = { sizeof(si) }; PROCESS_INFORMATION pi = {};
-    SetStatus(download ? "Downloading multiplayer update..." : "Checking for multiplayer updates...");
-    if (CreateProcessW(exe, cmd, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, net, &si, &pi)) {
-        DWORD waited = WaitForSingleObject(pi.hProcess, 180000);
-        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
-        FILE* f = nullptr;
-        if (waited == WAIT_OBJECT_0 && !_wfopen_s(&f, result, L"rb") && f) {
-            char state[32] = {}, message[512] = {};
-            fgets(state, sizeof(state), f); fread(message, 1, sizeof(message) - 1, f); fclose(f);
-            InterlockedExchange(&g_updateAvailable, strncmp(state, "Available", 9) == 0);
-            SetStatus(message[0] ? message : "Update check returned no result.");
-            DeleteFileW(result);
-        } else SetStatus("Update check did not finish. Try again later.");
-    } else SetStatus("Cannot start the updater. Install the latest multiplayer MSI once to enable updates.");
-    InterlockedExchange(&g_updateBusy, 0);
-    return 0;
-}
-static void StartUpdateCheck()
-{
-    if (InterlockedExchange(&g_updateBusy, 1)) return;
-    HANDLE thread = CreateThread(nullptr, 0, UpdateThread, nullptr, 0, nullptr);
-    if (thread) CloseHandle(thread); else InterlockedExchange(&g_updateBusy, 0);
-}
 static DWORD WINAPI CollectLogsThread(LPVOID)
 {
     Tpf2mpLogArchive a;
@@ -1923,7 +1885,6 @@ static void OnHit(int id, int button)
         if (g_flagShareMods==1 && g_modsPrompt[0]) OnHit(16);
         InterlockedExchange(&g_panelDirty,1);
         break;
-    case 18: StartUpdateCheck(); break;
     case 16: case 17: {   // YES / NO to the mod download
         const bool yes = (id == 16);
         if (g_csInit) { EnterCriticalSection(&g_statusCs); g_modsPrompt[0] = 0; LeaveCriticalSection(&g_statusCs); }
@@ -2095,6 +2056,23 @@ static VkResult myPresent(VkQueue q, const VkPresentInfoKHR* pi)
     PollWorldGen();
     DedicatedTick();
     LONG n = InterlockedIncrement(&g_presentCount);
+    {   // The frame meter: frames per second and the LONGEST frame of the last
+        // 5 s, in the log. The longest frame is the stutter number (a 60 fps
+        // average hides a 200 ms hitch). An overlay's own FPS counter (NVIDIA's)
+        // hooks the same present call and does not attach beside this detour
+        // (2026-09-20); Steam's counter does. Render thread only: plain statics.
+        static LARGE_INTEGER freq{}, last{}, windowStart{}; static double longest = 0; static LONG frames = 0;
+        LARGE_INTEGER t; QueryPerformanceCounter(&t);
+        if (!freq.QuadPart) { QueryPerformanceFrequency(&freq); last = windowStart = t; }
+        double dt = double(t.QuadPart - last.QuadPart) * 1000.0 / double(freq.QuadPart); last = t;
+        if (dt > longest) longest = dt;
+        frames++;
+        double win = double(t.QuadPart - windowStart.QuadPart) / double(freq.QuadPart);
+        if (win >= 5.0) {
+            Log("[menu] frames: %.0f/s, longest %.0f ms, over %.1f s\n", frames / win, longest, win);
+            frames = 0; longest = 0; windowStart = t;
+        }
+    }
     if ((n & 63) == 0 && InterlockedCompareExchange(&g_autoLoadPending, 0, 0) && GetTickCount64() - g_autoLoadSince > 12000) {
         // no menu frame took the load (not on a screen whose update runs): say how to load it by hand
         InterlockedExchange(&g_autoLoadPending, 0);
@@ -2638,6 +2616,10 @@ extern "C" {
         g_gameUi = rcx;
     }
 }
+// tpf2_slice.dll reads the CGameUI through this (its game-state provider at
+// +0x450 is how the slice builds a MovePathUtilContext for the line platform
+// assignment at replay). 0 between worlds.
+extern "C" __declspec(dllexport) uint64_t Tpf2mpGameUi() { return g_gameUi; }
 static const uintptr_t RVA_GAMEUI_UPDATE = 0x5741d0;
 static const int       STEAL_GAMEUI      = 21;
 static const uint8_t   GAMEUI_EXPECTED[STEAL_GAMEUI] = {
@@ -3590,7 +3572,7 @@ static void AutoLoadTick(void* menu)
     InterlockedExchange(&g_autoLoadPending, 0);
     int r = AutoLoadCall(menu, "mp_shared");
     Log("[menu] autoload: StartSavegame(mp_shared) -> %d\n", r);
-    if (r != 1) SetStatus("Couldn't start the shared save by itself -- open LOAD GAME and pick \"mp_shared\".");
+    if (r != 1) SetStatus("The game refused to start mp_shared (a mod it needs is not installed here?) -- open LOAD GAME and pick \"mp_shared\" to see why.");
 }
 
 static void MyMenuUpdate(void* menu, void* a2, void* a3, void* a4)
@@ -4570,7 +4552,6 @@ static DWORD WINAPI Init(LPVOID)
     InitializeCriticalSection(&g_modelCs); g_modelCsInit = true;
     InitializeCriticalSection(&g_lobbyCs); g_lobbyCsInit = true;
     InitializeCriticalSection(&g_syncCs); g_syncCsInit = true;
-    StartUpdateCheck();
     CreateThread(nullptr, 0, KbHookThread, nullptr, 0, nullptr);  // chat keyboard capture/swallow
     Log("[menu] attached, base=%llx  save=%ls  net=%ls  data=%ls  our=%ls\n",
         (unsigned long long)g_base, g_saveDirW, g_netDirW, g_dataDirW, ourDirW());

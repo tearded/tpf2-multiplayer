@@ -993,9 +993,9 @@ function buildVehConfig(c)
 		-- an empty loadConfig is a native assert (`!loadConfig.empty()`), not an error
 		if n == 0 then error("part without load slots: " .. spec) end
 		part.loadConfig = lc
-		-- the originator's flag (slice_hook.cpp reads it at VehiclePart+0x04); a
-		-- turned wagon or an ICE's tail head used to come out facing forward on
-		-- every instance, the originator's included (its buy is replayed too)
+		-- the originator's flag (the slice reads it at VehiclePart+0x04); a turned
+		-- wagon or an ICE's tail head used to come out facing forward on every
+		-- instance, the originator's included (its buy is replayed too)
 		part.reversed = (rev == "1")
 		local r, g, b = col:match("^([^,]+),([^,]+),([^,]+)$")
 		part.color = api.type.Vec3f.new(tonumber(r) or -1, tonumber(g) or -1, tonumber(b) or -1)

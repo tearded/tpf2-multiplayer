@@ -153,7 +153,6 @@ from __future__ import annotations
 
 import argparse
 from sync_lobby import HostRecovery, ClientRecovery, make_runtime
-from player_stats import PlayerStats       # relay-only: who plays, how much, how many at once (player_stats.json)
 import bulk_tcp                            # the TCP side channel the save/mod transfers stream over (2026-09-17)
 import dual_tcp                            # every sealed frame a second time over a TCP link, first copy wins (2026-09-17)
 import netsim                              # tpf2mp_netsim.txt: loss and delay for one instance, for the rig (2026-09-17)
@@ -193,7 +192,26 @@ CAP = 200               # max players in a lobby, INCLUDING the host (origins a.
 MAX_COMPANIES = 200     # company ids 1..200 (one addPlayer() entity each on every peer; measured 264 fine)
 PING_INTERVAL = 3.0     # joiner -> host lobby keepalive cadence
 DROP_AFTER = 10.0       # host drops a peer unheard-from for this long
-MODS_BATCH_BYTES = 192 * 1024 * 1024    # a mods round goes out in batches of about this much on disk (run_host start_pack_job)
+# A mods round goes out in batches of about this much ON DISK (run_host
+# start_pack_job). 192 MB until 2026-09-19: a save with 556 Workshop mods went
+# out as 359 batches, most of them one mod, each a full round trip (zip, send,
+# unzip, done) at about 15 s -- an hour and a half on loopback. Workshop
+# vehicle packs zip 5:1, so this is ~150-200 MB on the wire per batch. The
+# mods are packed smallest first, so the small ones fill a batch together
+# and the big ones go alone.
+MODS_BATCH_BYTES = 768 * 1024 * 1024
+MODS_PACK_THREADS = 3                      # batches zipped at once; zlib releases the GIL (3 threads: 21.7 s -> 11.3 s for three 1 GB mods)
+MODS_ZIP_LEVEL = 3                         # deflate level for a mods round (modshare.zip_mod)
+# A joiner unpacks a batch's zips on this many threads. Measured 2026-09-20 on the
+# two-instance rig, 555 mods / 93 GB in 140 batches: each batch crossed loopback
+# in 0.7-1.0 s and then took 7-9 s (23 s for the 65 small mods of batch 1) to
+# unpack on one thread -- ~110 MB/s -- while the host's packers ran 300 mods
+# ahead. The round was paced by the joiner's unzip alone. zlib and file writes
+# release the GIL, and every mod is its own zip, so they unpack side by side.
+MODS_UNPACK_THREADS = 8                    # file-by-file across every zip of the batch (modshare.install_mod_zips)
+TCP_CONNECT_TRIES = 3                      # a joiner's TCP connect for a transfer, before UDP takes over
+TCP_CONNECT_RETRY = 0.5                    # seconds between those attempts
+MODS_RATE_WINDOW = 5                       # the status line's MB/s is over this many landed batches
 ROSTER_HEAL = 2.0       # host re-sends the roster this often (UDP self-heal +
                         # doubles as a host -> joiner keepalive)
 HOST_GONE_AFTER = 12.0  # joiner declares the host dead after this much silence
@@ -318,9 +336,18 @@ SEND_BUDGET = 256           # max datagrams sent per peer per pump() -- bounds t
                             # for OTHER peers keep being serviced during a send.
 FEEDBACK_INTERVAL = 0.05    # receiver 'fack' (base + NACKs) cadence.
 BEGIN_INTERVAL = 0.2        # host re-sends 'fbegin' this often until a peer is ready.
+DONE_NUDGE_INTERVAL = 1.0   # a peer that holds every chunk but has not said done gets
+                            # the last chunk again this often (it answers with done)
 RESEND_AFTER = 0.5          # if a peer's facks go silent this long, rewind its send
                             # cursor and re-stream the window (recovers lost facks).
 PEER_XFER_TIMEOUT = 30.0    # no forward progress for this long -> skip that peer.
+# A peer that HAS every byte and is verifying, writing or unpacking it gets this
+# long between two facks whose progress count moved (2026-09-19: a joiner
+# unpacking a 665 MB mod batch was timed out at 30 s and the whole round with
+# it; a slow disk, a virus scanner or a Sandboxie overlay can hold a count
+# still for longer than that). Its facks are logged every 10 s so a silent
+# receiver is visible as such, not as "timed out".
+PEER_XFER_VERIFY_TIMEOUT = 300.0
 FINALIZE_SLICE = 8 << 20    # a receiver hashes and writes its completed save in these steps,
                             # reporting each in its facks; a slow disk moves one in well under a second
 _UNSET = object()           # "no verify progress reported yet" (a reported None must differ from it)
@@ -533,21 +560,14 @@ def _dedupe(name, taken):
 # File IPC: the flat-file surface the in-game menu reads/writes
 # --------------------------------------------------------------------------- #
 def _report_command(cmd, io, log, url_base=None):
-    """The in-game desync popup's commands (mod: res/scripts/mp/desyncreport.lua).
-
-    {"cmd":"upload_logs",...} sends this game's logs to the master server
-    (netpunch/desynclogs.py, in the background); {"cmd":"note","text":...} shows
-    a chat line from MULTIPLAYER to this player only. True when cmd was one.
+    """A game script's request to the lobby: {"cmd":"note","text":...} shows a chat
+    line from MULTIPLAYER to this player only. True when cmd was one. (The desync
+    log upload that also came this way was removed on 2026-09-20: nothing leaves
+    the player's machine but what they host or join with.)
     """
     c = cmd.get("cmd")
     if c == "note":
         io.emit({"type": "chat", "from": "MULTIPLAYER", "text": str(cmd.get("text", ""))[:400]})
-        return True
-    if c == "upload_logs":
-        import desynclogs
-        url = (url_base.rstrip("/") + "/desync") if url_base else None
-        if desynclogs.start(io, log, cmd, LOBBY_VERSION, url):
-            log(f"[report] desync logs requested (instance {cmd.get('instance')!r}, {cmd.get('reason')!r})")
         return True
     return False
 
@@ -571,9 +591,7 @@ class LobbyIO:
         open(self.out_path, "w", encoding="utf-8").close()
         open(self.in_path, "w", encoding="utf-8").close()
         self._in_offset = 0
-        # A fresh id per lobby run. The in-game desync popup reads it here
-        # (desyncreport.lua) so it asks, and sends, at most once per session,
-        # even when the players reload the game to recover from the desync.
+        # A fresh id per lobby run, for anything that wants to act once per session.
         self._state = {"session": os.urandom(6).hex()}
         self._lock = threading.Lock()
         self.write_state()
@@ -1134,6 +1152,48 @@ def _mod_check(save_path, io, log):
     return False
 
 
+def _host_missing_mods(mods, lookup=None):
+    """The (id, version) pairs of ``mods`` that are nowhere on THIS PC: not in a
+    Steam Workshop folder, not a managed download, not in the game's mods or
+    dlcs folders (the host's own lookup, modshare.find_mod)."""
+    lookup = lookup or modshare.find_mod
+    return [(m, v) for m, v in mods if modshare.valid_mod(m, v) and lookup(m, v) is None]
+
+
+def _host_mods_check(save_path, mods, io, log, lookup=None):
+    """True when the host's own game can load ``save_path``: every mod the save
+    needs is on this PC. Otherwise the start is refused and the missing mods are
+    NAMED. Until 2026-09-20 the host pushed the save, every joiner loaded it, and
+    the host's own game refused it with nothing but "Couldn't start the shared
+    save by itself -- open LOAD GAME" (the host had unsubscribed from 557 Workshop
+    items between two sessions; the game found 29 mods where the save wanted
+    563). ``mods`` is the list save_mod_list read (None = unknown: nothing to
+    check, the transfer goes ahead as before)."""
+    if not mods:
+        return True
+    missing = _host_missing_mods(mods, lookup)
+    if not missing:
+        return True
+    label = os.path.basename(str(save_path))
+    if label.lower().endswith(".sav"):
+        label = label[:-4]
+    names = [modshare.mod_folder_name(m, v) for m, v in missing]
+    shown = ", ".join(names[:8]) + (f", ... ({len(names) - 8} more)" if len(names) > 8 else "")
+    log(f"[host] NOT sharing {save_path}: it needs {len(names)} mod(s) this PC does not have, "
+        f"so the host's own game could not load it: {', '.join(names)}")
+    io.emit({"type": "status", "state": "connected",
+             "detail": f"Not started: '{label}' needs {len(names)} mod(s) not installed on this PC (see chat)"})
+    now = time.time()
+    key = ("host-mods", save_path)
+    if now - _mod_refusal_notes.get(key, 0.0) > 60.0:
+        _mod_refusal_notes[key] = now
+        io.emit({"type": "chat", "from": "MULTIPLAYER",
+                 "text": f"'{label}' needs {len(names)} mod(s) that are not installed on this PC, so your own game "
+                         f"cannot load it: {shown}. Subscribe to them on the Steam Workshop (or put them in the "
+                         "game's mods folder), let Steam finish downloading, then press START GAME again."})
+    return False
+
+
 def _read_save_files(save_path):
     """Read the .sav and any sidecars; return (blob, files_meta).
 
@@ -1390,6 +1450,20 @@ class _HostSaveTransfer:
             p["tcp"] = False
             self.log(f"[host] {p['name']}: the TCP stream broke after {p.get('tcp_sent', 0)} B -- UDP takes over")
 
+    def _stage_word(self):
+        """'mods k/n' or 'mods' -- the roster's 120 px stage column."""
+        b = (self.begin_msg or {}).get("batch")
+        if isinstance(b, list) and len(b) == 2:
+            return f"mods {b[0]}/{b[1]}"
+        return "mods"
+
+    def _what(self):
+        """'save', 'mods', or 'mod batch k/n' -- for the log."""
+        b = (self.begin_msg or {}).get("batch")
+        if self.kind == "mods" and isinstance(b, list) and len(b) == 2:
+            return f"mod batch {b[0]}/{b[1]}"
+        return self.kind
+
     # -- progress ---------------------------------------------------------- #
     def _emit_pct(self, p):
         if self.total_bytes == 0:
@@ -1399,10 +1473,16 @@ class _HostSaveTransfer:
             pct = int(done * 100 // self.total_bytes)
         if pct // 10 > p["last_pct"] // 10:
             p["last_pct"] = pct
-            self.io.emit({"type": "transfer", "role": "send",
-                          "peer": p["name"], "pct": pct})
+            if self.kind != "mods":
+                # The menu prints every transfer event over its status line
+                # ("Sending save... N%", then "Save transfer complete."). A mods
+                # batch crosses in under a second and the round's own status
+                # line (landed GB, MB/s, time left) is the one to keep in view.
+                self.io.emit({"type": "transfer", "role": "send",
+                              "peer": p["name"], "pct": pct})
             if self.stage_cb:
-                self.stage_cb(p["name"], f"receiving save {pct}%", pct)
+                self.stage_cb(p["name"], (f"{self._stage_word()} {pct}%" if self.kind == "mods"
+                                          else f"receiving save {pct}%"), pct)
 
     # -- outbound chunk ---------------------------------------------------- #
     def _send_chunk(self, addr, seq):
@@ -1471,10 +1551,14 @@ class _HostSaveTransfer:
             # a worker stuck in a disk hang or a wedged unzip would otherwise
             # hold transfer[0] (and every resync) open for ever.
             mark = msg.get("progress")
+            p["verifying"] = bool(msg.get("verifying"))
             if mark != p.get("verify_progress", _UNSET):
                 p["verify_progress"] = mark
                 p["last_advance"] = now
                 self.progress_at = now
+            if now - p.get("verify_said", 0.0) >= 10.0:
+                p["verify_said"] = now
+                self.log(f"[host] {p['name']} has the whole {self.kind}; verifying/unpacking, {mark if mark is not None else '?'} B so far")
         elif base < p["base"]:
             # REWIND: the receiver restarted from scratch (hash mismatch ->
             # whole-file re-request). Without this the host would filter every
@@ -1511,11 +1595,13 @@ class _HostSaveTransfer:
             if p["state"] == "active":
                 p["state"] = "done"
                 self.progress_at = time.time()
-                self.io.emit({"type": "transfer", "role": "send",
-                              "peer": p["name"], "state": "done"})
-                self.log(f"[host] {p['name']} verified save transfer")
+                if self.kind != "mods":
+                    self.io.emit({"type": "transfer", "role": "send",
+                                  "peer": p["name"], "state": "done"})
+                self.log(f"[host] {p['name']} verified {self._what()} transfer")
                 if self.stage_cb:
-                    self.stage_cb(p["name"], "save received, loading", None)
+                    self.stage_cb(p["name"], "save received, loading" if self.kind != "mods"
+                                  else f"{self._stage_word()} done", None)
         elif msg.get("final"):
             if p["state"] == "active":
                 p["state"] = "failed"
@@ -1542,17 +1628,29 @@ class _HostSaveTransfer:
         for addr, p in self.peers.items():
             if p["state"] != "active":
                 continue
-            if now - p["last_advance"] > PEER_XFER_TIMEOUT:
+            verifying = p.get("verifying") and p["base"] >= self.total_chunks
+            if now - p["last_advance"] > (PEER_XFER_VERIFY_TIMEOUT if verifying else PEER_XFER_TIMEOUT):
                 p["state"] = "failed"
                 self.io.emit({"type": "transfer", "role": "send",
                               "peer": p["name"], "state": "failed",
                               "detail": "timed out"})
-                self.log(f"[host] {p['name']} save transfer TIMED OUT")
+                self.log(f"[host] {p['name']} save transfer TIMED OUT ({'its verify/unpack count stopped moving' if verifying else 'no forward progress'} "
+                         f"for {now - p['last_advance']:.0f} s; last fack {now - p['last_fack']:.0f} s ago, base {p['base']}/{self.total_chunks})")
                 continue
             if not p["ready"] or self.total_chunks == 0:
                 if now - p["last_begin"] >= BEGIN_INTERVAL:
                     _send_data(self.sock, addr, self.begin_msg)
                     p["last_begin"] = now
+                continue
+            if p["base"] >= self.total_chunks and not p.get("verifying"):
+                # Every chunk is delivered and the peer is past its verify, yet no
+                # done has arrived: its announcement was lost. Re-send the last
+                # chunk now and then (a chunk to a finished receiver is answered
+                # with done) so recovery does not rest on the peer's timer alone.
+                # This is the ONLY path for a TCP peer, which no chunk otherwise reaches.
+                if now - p.get("last_nudge", 0.0) >= DONE_NUDGE_INTERVAL:
+                    p["last_nudge"] = now
+                    self._send_chunk(addr, self.total_chunks - 1)
                 continue
             if p["tcp"]:
                 continue                        # streaming over TCP: nothing to send here
@@ -1694,12 +1792,16 @@ class _ClientSaveReceiver:
         self.finalizing = False    # a worker thread is verifying/writing the completed transfer
         self.finalize_progress = 0 # bytes that worker has hashed, written or unpacked so far (read by the loop)
         self._worker = None
+        self._progress_lock = threading.Lock()   # _advance is called from the unpack threads too
         self._results = queue.Queue()
         self.deferred_begin = None # sid of an fbegin held back while finalizing (logged once)
         self.manifest_unknown = False
         self.batch = None            # [k, n] of the mods batch being received (a host from 0.6.1.7 on)
         self.batch_open = False      # a round is under way: more batches follow, do not ask again
+        self.batch_done = False      # this batch is installed and its done is being announced (cleared by the next fbegin)
         self.batch_got = set()       # mods installed or present across the round's batches
+        self.registering = []        # [(id, ver, folder)] on disk here, being registered with the game (catalogue_token pending)
+        self.round_receipt = False   # the pending catalogue_token closes a download round (else it is a registration)
         # THE TCP CHANNEL (bulk_tcp.py). A joiner connects to the sender's listener
         # (the host's or relay's, named in fbegin) and a reader thread queues the
         # stream; the relay, which listens itself, accepts the leader's upload the
@@ -1758,17 +1860,105 @@ class _ClientSaveReceiver:
             self.cancel_reason="Required DLC is not installed: " + ", ".join(missing_dlc) + ". DLC is never transferred."
             self.io.emit({"type":"mods_cancelled","text":"Required DLC is not installed: " + ", ".join(missing_dlc) + ". DLC is never transferred."})
             return
-        self.need=[modshare.mod_folder_name(m,v) for m,v in mods if modshare.installed_mod(m,v) is None]
+        self.need, on_disk = self._split_missing(mods)
         self.offered=list(self.need)
         self.approved=set()
         self.preflight=True
         self.ask=bool(self.need)
-        self.mods_satisfied=not self.need
+        self.mods_satisfied=not self.need and not on_disk
+        if on_disk and not self._register(on_disk):
+            return
         if self.ask:
             self.consent_id+=1
             self.io.emit({"type":"mods_prompt", "offer":self.consent_id, "count":len(self.need), "text":", ".join(self.need)})
         else:
             self.io.emit({"type":"mods_clear"})
+
+    def _split_missing(self, mods):
+        """Of the mods a save needs, the folder names to DOWNLOAD (nowhere on
+        this machine) and the [(id, ver, folder)] to REGISTER: on disk here, but
+        not in the game's catalogue. Until 2026-09-20 both were "need": a joiner
+        whose game had not catalogued a folder -- every mod of a round that never
+        finished, since the registry was published only at a round's last batch
+        -- had it zipped, sent and found "present" on arrival (21 folders, 2 GB,
+        on 2026-09-20). The game loads what its catalogue lists, so a folder that
+        is here is registered, never fetched."""
+        need, on_disk = [], []
+        for m, v in mods:
+            if modshare.installed_mod(m, v) is not None:
+                continue
+            folder = modshare.on_disk_mod(m, v)
+            if folder:
+                on_disk.append((m, v, folder))
+            else:
+                need.append(modshare.mod_folder_name(m, v))
+        self._publish_rows(mods)
+        self._say_unreadable(mods)
+        return need, on_disk
+
+    def _say_unreadable(self, mods):
+        """Which required mods this game could not read (its stdout.txt said 'Mod
+        will be skipped' at startup): find_mod passed those folders over, so they
+        are fetched from the host and registered in their place -- say so."""
+        bad = [(modshare.mod_folder_name(m, v), modshare.skipped_copies.get(m)) for m, v in mods if m in modshare.skipped_copies]
+        if not bad:
+            return
+        shown = ", ".join(f"{n} ({p})" for n, p in bad[:4]) + (f", +{len(bad) - 4} more" if len(bad) > 4 else "")
+        self.log(f"[client] {len(bad)} required mod(s) have a copy here the game could not read (stdout.txt: 'Mod will be skipped') -- "
+                 f"the host's copy is fetched and registered in its place: {shown}")
+        self.io.emit({"type": "chat", "from": "MULTIPLAYER",
+                      "text": f"Your game could not read {len(bad)} mod(s) this save needs (" + ", ".join(n for n, _ in bad[:4])
+                              + (", ..." if len(bad) > 4 else "") + "); the host's copy will be fetched. "
+                                "A Workshop item that stays broken here: unsubscribe, delete its folder and subscribe again."})
+
+    def _publish_rows(self, mods):
+        """A registry row for EVERY Workshop mod of the save whose folder is on
+        this machine, catalogued or not (the token is kept; no refresh is asked
+        for -- the world load's own refresh reads the registry, and the plugin
+        registers each row in place of the game's own entry for that id).
+
+        Why also the catalogued ones: the game's own entry for a Workshop id can
+        lack a folder (an item Steam lists but has not installed), and the
+        loader runs a listed mod's mod.lua at world load from whatever entry it
+        holds. A row names the folder this lobby verified on disk, and the
+        plugin registers it in place of the game's entry. Background: a joiner
+        whose world load died running the Boeing 777 Pack's mod file, with Car
+        Parks on the same stack, while the host loaded the same save
+        (2026-09-20); the error text of that run is still to be seen."""
+        rows = _workshop_rows(mods, modshare.on_disk_mod)
+        if not rows:
+            return
+        try:
+            modshare.write_registry(None, rows)
+            self.log(f"[client] registry: {len(rows)} Workshop folder(s) of this save published for the game's next refresh")
+        except (OSError, ValueError) as e:
+            self.log(f"[client] could not publish the Workshop rows: {e}")
+
+    def _register(self, on_disk):
+        """Publish the registry naming these folders and ask the game to refresh
+        its catalogue; the receipt (tick) must list every one. A registration
+        already pending is folded in. False if the registry could not be
+        written (the receiver has failed)."""
+        rows = {(m, v): folder for m, v, folder in self.registering}
+        rows.update({(m, v): folder for m, v, folder in on_disk})
+        pending = [(m, v, folder) for (m, v), folder in rows.items()]
+        extra = [(m[1:], folder) for m, v, folder in pending if m.startswith("*")]
+        try:
+            self.catalogue_token = modshare.request_catalogue(extra)
+        except (OSError, ValueError) as e:
+            self._fail("cannot publish mod registry: " + str(e))
+            return False
+        self.catalogue_since = time.time()
+        self.registering = pending
+        self.round_receipt = False
+        names = [modshare.mod_folder_name(m, v) for m, v, _ in pending]
+        shown = ", ".join(names[:6]) + (f", +{len(names) - 6} more" if len(names) > 6 else "")
+        self.log(f"[client] {len(names)} mod(s) the save needs are on this PC but not in the game's catalogue -- "
+                 f"registering them, not downloading: {shown}")
+        self.io.emit({"type": "status", "state": "connected",
+                      "detail": f"registering {len(names)} mod(s) already on this PC\u2026"})
+        self.io.emit({"type": "mods_refresh"})
+        return True
 
     def answer_mods(self, accept, offer=None):
         if offer is not None and offer != self.consent_id: return
@@ -1903,6 +2093,7 @@ class _ClientSaveReceiver:
             self.preflight=False
             self.required=[]
             self.save_done = False
+            on_disk = []
             for ent in (msg.get("mods") or []):
                 try:
                     m, v = str(ent[0]), int(ent[1])
@@ -1921,8 +2112,16 @@ class _ClientSaveReceiver:
                         self.cancel_reason="Required DLC is missing. Deluxe and Early Supporter content cannot be downloaded from the host."
                         self.io.emit({"type":"mods_cancelled","text":"Required DLC is missing. Deluxe and Early Supporter content cannot be downloaded from the host."})
                         return
+                    if not present:
+                        folder = modshare.on_disk_mod(m, v)
+                        if folder:                       # here, not catalogued: register (see _split_missing)
+                            on_disk.append((m, v, folder))
+                            present = True
                 if not present:
                     self.need.append(modshare.mod_folder_name(m, v))
+            self._publish_rows(self.required)
+            if on_disk and not (self.catalogue_token and self.round_receipt) and not self._register(on_disk):
+                return
             if msg.get("mods_unknown"):
                 self._manifest_unknown()             # the list is unknown, not empty: say so, take the save
             # a new save round asks afresh: an earlier yes does not carry over
@@ -1962,6 +2161,7 @@ class _ClientSaveReceiver:
         self.retries = 0
         self.last_pct = -1
         self.done_sends = 0
+        self.batch_done = False
         self.log(f"[client] save incoming sid={sid} {self.total_bytes}B "
                  f"{self.total_chunks} chunks")
         ack = {"t": "fbegin_ack", "sid": sid, "need": self.need, "ask": self.ask}
@@ -1979,18 +2179,29 @@ class _ClientSaveReceiver:
                 threading.Thread(target=self._tcp_pull, args=(self.conn.peer[0], tcp["port"], tcp["token"], sid),
                                  name="bulk-pull", daemon=True).start()
         self._send(ack)
-        self.io.emit({"type": "transfer", "role": "recv", "pct": 0})
+        if kind != "mods":
+            self.io.emit({"type": "transfer", "role": "recv", "pct": 0})   # a mods batch: the round's status line stays
         if self.total_chunks == 0:
             self._finalize()
 
     # -- the TCP channel --------------------------------------------------- #
     def _tcp_pull(self, ip, port, token, sid):
-        """A thread: connect to the sender's listener and read the file."""
-        sock = bulk_tcp.bulk_connect(ip, port, "recv", sid, token, self.my_name)
-        if sock is None:
-            self.log(f"[client] no TCP stream from {ip}:{port} -- receiving over UDP")
-            return
-        self._tcp_read(sock, sid)
+        """A thread: connect to the sender's listener and read the file. A
+        connect that fails is tried again (TCP_CONNECT_TRIES): the UDP fallback
+        is 20x slower than the stream, and nothing has been read yet, so a fresh
+        stream from the start is consistent with what UDP delivers meanwhile
+        (chunks already in hand are dropped as duplicates)."""
+        for attempt in range(1, TCP_CONNECT_TRIES + 1):
+            if sid != self.sid:
+                return                       # a later transfer replaced this one
+            sock = bulk_tcp.bulk_connect(ip, port, "recv", sid, token, self.my_name)
+            if sock is not None:
+                self._tcp_read(sock, sid)
+                return
+            if attempt < TCP_CONNECT_TRIES:
+                self.log(f"[client] no TCP stream from {ip}:{port} (attempt {attempt}) -- trying again")
+                time.sleep(TCP_CONNECT_RETRY)
+        self.log(f"[client] no TCP stream from {ip}:{port} after {TCP_CONNECT_TRIES} attempts -- receiving over UDP")
 
     def _tcp_accepted(self, sock, addr, name):
         """ACCEPT THREAD HELPER (the relay): the leader connected to push its upload."""
@@ -2043,7 +2254,7 @@ class _ClientSaveReceiver:
     def on_chunk(self, sid, seq, data):
         if self.sid is None or sid != self.sid:
             return
-        if self.complete:
+        if self.complete or self.batch_done:
             self._maybe_send_done(force=True)   # nudge host to stop resending
             return
         if self.finalizing:
@@ -2076,8 +2287,14 @@ class _ClientSaveReceiver:
             pct = int(self.recv_count * 100 // self.total_chunks)
         if pct // 10 > self.last_pct // 10:
             self.last_pct = pct
-            self.io.emit({"type": "transfer", "role": "recv", "pct": pct})
-            self._send({"t": "stage", "text": f"receiving save {pct}%"})
+            if self.kind != "mods":
+                self.io.emit({"type": "transfer", "role": "recv", "pct": pct})
+            # the roster's stage column is 120 px wide: "mods 32/140 90%", not a sentence
+            if self.kind == "mods":
+                what = f"mods {self.batch[0]}/{self.batch[1]}" if self.batch else "mods"
+                self._send({"t": "stage", "text": f"{what} {pct}%"})
+            else:
+                self._send({"t": "stage", "text": f"receiving save {pct}%"})
 
     # -- periodic (called from the client loop) ---------------------------- #
     def tick(self, now):
@@ -2099,24 +2316,43 @@ class _ClientSaveReceiver:
         if self.catalogue_token:
             token, entries = modshare.catalogue()
             if token == self.catalogue_token:
-                missing=[modshare.mod_folder_name(m,v) for m,v in self.required if (m,str(v)) not in entries]
+                check = self.required if self.round_receipt else [(m, v) for m, v, _ in self.registering]
+                missing=[modshare.mod_folder_name(m,v) for m,v in check if (m,str(v)) not in entries]
                 self.catalogue_token=None
+                self.registering=[]
                 if missing:
-                    self._fail("mods not recognised by game: " + ", ".join(missing))
+                    self._fail(("mods not recognised by game: " if self.round_receipt else
+                                "mods on this PC the game does not recognise (delete the folder to download the host's copy): ")
+                               + ", ".join(missing))
                     self.cancelled=True
                     return
-                self.complete=True
-                self.mods_satisfied=True
-                self.io.emit(dict({"type":"mods_ready", "failed":[]}, **getattr(self,"install_result",{})))
-                self._maybe_send_done(force=True)
+                if self.round_receipt:
+                    self.complete=True
+                    self.mods_satisfied=True
+                    self.io.emit(dict({"type":"mods_ready", "failed":[]}, **getattr(self,"install_result",{})))
+                    self._maybe_send_done(force=True)
+                else:
+                    # a registration: the on-disk folders are catalogued; what is
+                    # not here at all is still to be downloaded (need, prompt, round)
+                    self.mods_satisfied = not self.need
+                    self.log(f"[client] the game registered the mods already on this PC"
+                             + ("" if self.mods_satisfied else f"; {len(self.need)} still to download"))
+                    if self.mods_satisfied:
+                        self.io.emit({"type": "mods_ready", "failed": [], "registered": len(check)})
             elif now-self.catalogue_since>45:
                 self._fail("game did not refresh its mod catalogue")
                 self.cancelled=True
                 self.catalogue_token=None
-            return
+            if self.round_receipt or self.cancelled or self.sid is None:
+                return                    # a registration beside a live transfer keeps feeding it
         if self.sid is None or self.failed:
             return
-        if self.complete:
+        if self.complete or self.batch_done:
+            # A batch that is not the last of its round leaves `complete` false
+            # (the round is still open), and until 2026-09-20 that meant its done
+            # went out exactly ONCE: one lost datagram and the host, with every
+            # chunk already delivered and nothing to retransmit, timed the peer
+            # out 30 s later and failed the round (batch 18/359, 2026-09-20 01:14).
             self._maybe_send_done(now=now)
             return
         if now - self.last_fack >= FEEDBACK_INTERVAL:
@@ -2141,7 +2377,9 @@ class _ClientSaveReceiver:
         # lost), so we keep re-announcing it on a timer AND force a reply to any
         # chunk the host retransmits -- either way the host learns we're done.
         now = now or time.time()
-        if force or (self.done_sends < 40 and now - self.last_done >= 0.2):
+        # every 0.2 s for the first 8 s, then every second for as long as the host
+        # keeps this transfer open (it stops asking once it moves on)
+        if force or now - self.last_done >= (0.2 if self.done_sends < 40 else 1.0):
             self.last_done = now
             self.done_sends += 1
             self._send({"t": "fdone", "sid": self.sid, "ok": True})
@@ -2181,9 +2419,10 @@ class _ClientSaveReceiver:
 
     def _advance(self, count):
         """WORKER THREAD: another ``count`` bytes hashed, written or unpacked.
-        The loop reads the total into every fack while verifying (an int
-        assignment is atomic; nothing else writes it while the worker runs)."""
-        self.finalize_progress += count
+        The loop reads the total into every fack while verifying; the unpack
+        threads of a batch all add to it, hence the lock."""
+        with self._progress_lock:
+            self.finalize_progress += count
 
     def _sha256(self, data):
         """A SHA-256 hex digest computed in FINALIZE_SLICE windows so the
@@ -2299,6 +2538,13 @@ class _ClientSaveReceiver:
                 # one batch of a round: hand it back and wait for the next
                 self.batch_open = True
                 self.complete = False
+                self.batch_done = True
+                try:
+                    # publish what this batch installed NOW (keeping any pending token):
+                    # a round that stops here still registers its mods at the next game start
+                    modshare.write_registry()
+                except (OSError, ValueError) as e:
+                    self.log(f"[client] could not publish the mod registry after batch {self.batch[0]}: {e}")
                 self.log(f"[client] mod batch {self.batch[0]}/{self.batch[1]} installed -- waiting for the next")
                 self._maybe_send_done(force=True)
                 return
@@ -2309,6 +2555,8 @@ class _ClientSaveReceiver:
             except (OSError,ValueError) as e:
                 self._fail("cannot publish mod registry: " + str(e))
                 return
+            self.round_receipt = True
+            self.registering = []
             self.catalogue_since=time.time()
             self.io.emit({"type":"mods_refresh"})
             return
@@ -2335,6 +2583,7 @@ class _ClientSaveReceiver:
         host sends one zip set to everyone who lacked something, so the rest
         are left alone. Returns what happened; _mods_installed tells the player."""
         done, kept, bad, skipped = [], [], [], []
+        jobs = []
         for name, part in parts.items():
             idv = modshare.parse_mod_zip_name(name)
             if not idv:
@@ -2345,23 +2594,31 @@ class _ClientSaveReceiver:
                     skipped.append(label)
                 self.log(f"[client] mod {label}: not agreed to here -- not installed")
                 continue
-            if self.server_cache:
-                if modshare.is_dlc(idv[0]):
-                    bad.append(label); continue
+            if self.server_cache and modshare.is_dlc(idv[0]):
+                bad.append(label); continue
+            jobs.append((idv, label, part))
+        results = []
+        if self.server_cache:
+            for idv, label, part in jobs:
                 try:
                     os.makedirs(self.server_cache,exist_ok=True)
                     path=os.path.join(self.server_cache,modshare.cache_name(*idv))
                     with open(path+".tmp","wb") as f: f.write(part)
                     os.replace(path+".tmp",path)
-                    st="installed"
+                    results.append((label, "installed", path))
                 except OSError as e:
                     self.log(f"[relay] cannot cache {label}: {e}")
-                    bad.append(label)
-                    continue
-            else:
-                st, path = modshare.install_mod_zip(bytes(part), idv[0], idv[1], self.log, progress=self._advance)
-            (done if st == "installed" else kept if st == "present" else bad).append(label)
+                    results.append((label, "failed", None))
+        else:
+            # every file of every zip in the batch over one pool: a batch of many
+            # small mods and one mod of 1,300 files both keep every thread busy
+            # (one thread per zip left a 1,330-file mod alone for 8 s, 2026-09-20)
+            outcome = modshare.install_mod_zips([(bytes(part), idv[0], idv[1]) for idv, _, part in jobs],
+                                                self.log, progress=self._advance, threads=MODS_UNPACK_THREADS)
+            results = [(label,) + outcome.get(label, ("failed", None)) for _, label, _ in jobs]
+        for label, st, path in results:
             self.log(f"[client] mod {label}: {st}" + (f" -> {path}" if path else ""))
+            (done if st == "installed" else kept if st == "present" else bad).append(label)
         return {"done": done, "kept": kept, "bad": bad, "skipped": skipped, "approved": sorted(approved)}
 
     def _mods_installed(self, r):
@@ -2422,8 +2679,6 @@ def version_rejection(remote):
 
 
 PUBLISH_EVERY = 10.0        # the master drops a row 30 s after its last announce
-
-
 class _Publisher:
     """Announces this lobby to the master server every PUBLISH_EVERY seconds
     while ``on``; a ``leave`` goes out when it is switched off or the host
@@ -2465,7 +2720,7 @@ class _Publisher:
         self._t.join(timeout=6)
 
     def _post(self, path, body):
-        import urllib.request
+        import urllib.request, urllib.error   # noqa: F401 -- HTTPError is caught by the caller
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(self.url + path, data=data,
                                      headers={"Content-Type": "application/json",
@@ -2474,6 +2729,7 @@ class _Publisher:
             return r.status
 
     def _run(self):
+        import urllib.error
         announced = False
         while not self._stop.is_set():
             try:
@@ -2808,6 +3064,7 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
     start_save = [False]                    # save flag of the last broadcast start
     last_emitted_roster = [None]
     transfer = [None]                       # the active _HostSaveTransfer, or None
+    unplaced_feedback = set()               # (addr, sid) of facks/fdones the transfer could not place, logged once each
     upload = [None]                         # relay-only: the leader's save coming in
     pending_resume = [None]                 # relay-only: (leader addr, when) -- the stored world goes out then
     # A relay that holds a world loads it as soon as a leader arrives (2026-09-12: the
@@ -2830,13 +3087,6 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
                 chips.update({str(k): int(v) for k, v in json.load(f).items()})
         except (OSError, ValueError):
             pass
-    # PLAYER STATISTICS (2026-09-17), relay-only: joins, time connected, starts,
-    # frames relayed, per player (by profile code, else name) and in total, with
-    # the peak of players at once. player_stats.json in the io dir; a summary
-    # line in the log every ten minutes while somebody is connected.
-    stats = PlayerStats(os.path.join(io.dir, "player_stats.json"), log) if relay_only else None
-    if stats:
-        log("[stats] " + stats.summary())
 
     def remember_chip(name, cid):
         if not relay_only:
@@ -3148,7 +3398,7 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
             try:
                 with open(path,"rb") as f: return f.read()     # whole: a cached mod is as big as it is
             except OSError: return None
-        return modshare.package_mod(m,v)
+        return modshare.package_mod(m,v, level=MODS_ZIP_LEVEL, log=log)
 
     def broadcast_chat(frm, text):
         cid_counter[0] += 1
@@ -3202,8 +3452,6 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
         # reach keeps its flag for the round that finally serves it.
         switching = {a for a in targets if peers[a].pop("switch", False)}
         for a in targets:
-            if stats and not peers[a].get("started"):
-                stats.started(peers[a]["name"], peers[a].get("profile"))
             peers[a]["started"] = True      # heal roster carries started:true
         if relay_only and upload[0] is not None and getattr(upload[0], "complete", False):
             upload[0] = None                # this upload has been distributed
@@ -3274,8 +3522,6 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
                            "links": [], "mesh": bool(is_mesh),
                            "company": company}
             remember_chip(assigned, company)
-            if stats:
-                stats.join(assigned, profile)
             if dual is not None and isinstance(addr, tuple) and not dual.has_link(addr):
                 # our half of the TCP simultaneous open toward the joiner (a NAT that
                 # preserves ports lets it land on the joiner's listener); the joiner's
@@ -3380,8 +3626,6 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
                 return
             for a, p in peers.items():
                 if p["name"] == to:
-                    if stats and GameRelay.is_game(inner):
-                        stats.frame(peers[addr]["name"], len(inner), peers[addr].get("profile"))
                     # a mesh joiner unwraps envelopes itself; a legacy (star)
                     # joiner only understands plain frames
                     out = payload if p.get("mesh") else inner
@@ -3396,8 +3640,6 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
             # bridge. Only from a peer that has joined -- strays are dropped.
             if addr in peers:
                 peers[addr]["last"] = time.time()
-                if stats:
-                    stats.frame(peers[addr]["name"], len(payload), peers[addr].get("profile"))
                 if relay is not None:
                     relay.deliver(payload)
                 if relay_only and peers[addr].get("mesh"):
@@ -3565,8 +3807,6 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
         elif t == "leave":
             if addr in peers:
                 log(f"[host] LEAVE {addr} ({peers[addr]['name']})")
-                if stats:
-                    stats.leave(peers[addr]["name"], peers[addr].get("profile"))
                 del peers[addr]
                 if transfer[0] is not None:
                     transfer[0].on_peer_dropped(addr)
@@ -3575,12 +3815,19 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
         elif t == "fbegin_ack":
             if transfer[0] is not None:
                 transfer[0].on_begin_ack(addr, msg)
-        elif t == "fack":
-            if transfer[0] is not None:
-                transfer[0].on_fack(addr, msg)
-        elif t == "fdone":
-            if transfer[0] is not None:
-                transfer[0].on_fdone(addr, msg)
+        elif t in ("fack", "fdone"):
+            xf = transfer[0]
+            if xf is not None:
+                if addr not in xf.peers or msg.get("sid") != xf.sid:
+                    key = (addr, msg.get("sid"))
+                    if key not in unplaced_feedback:
+                        unplaced_feedback.add(key)
+                        log(f"[host] {t} from {peers.get(addr, {}).get('name', addr)} for sid {msg.get('sid')} cannot be placed: "
+                            f"the transfer is sid {xf.sid} to {', '.join(q['name'] for q in xf.peers.values())}")
+                elif t == "fack":
+                    xf.on_fack(addr, msg)
+                else:
+                    xf.on_fdone(addr, msg)
         elif t == "mods_request":
             if transfer[0] is not None and addr in transfer[0].peers:
                 # A joiner prompted BEFORE the save is in "preflight" mode, and
@@ -3680,7 +3927,18 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
                 log("[host] start(save): everyone already has this save -- nothing to push")
                 return
         mods = modshare.save_mod_list(save_path, log)        # None = could not read it (NOT "none")
+        if not relay_only and not _host_mods_check(save_path, mods, io, log):
+            return                                           # refused: the host's own game could not load it (status + chat name the mods)
         advertised[:]=[save_path,mods]
+        if mods and not relay_only:
+            # the host loads this save too: its own removed-item subscriptions need the rows as much
+            rows = _workshop_rows(mods, modshare.find_mod)
+            if rows:
+                try:
+                    modshare.write_registry(None, rows)
+                    log(f"[host] registry: {len(rows)} Workshop folder(s) of this save published for the game's next refresh")
+                except (OSError, ValueError) as e:
+                    log(f"[host] could not publish the Workshop rows: {e}")
         for a,_ in targets: preflight_requests.pop(a,None)
         if mods is None:
             mod_list_note(save_path, "START GAME")
@@ -3980,8 +4238,6 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
                                         exempt=set(pack_job[0]["addrs"]) if pack_job[0] else ())
                 for a in dead:
                     log(f"[host] DROP {a} ({peers[a]['name']}) -- silent")
-                    if stats:
-                        stats.leave(peers[a]["name"], peers[a].get("profile"))
                     del peers[a]
                     frags.forget(a)
                     if transfer[0] is not None:
@@ -4011,8 +4267,6 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
                     # every member loaded that world: a newcomer brought in by a
                     # frozen join is started now (no START GAME push for it)
                     for p in peers.values():
-                        if stats and not p.get("started"):
-                            stats.started(p["name"], p.get("profile"))
                         p["started"] = True
                     started[0] = True
                     io.emit(dict(type='transport_lobby', epoch=transport_lobby))
@@ -4040,8 +4294,6 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
 
             if relay is not None:
                 relay.tick(now)                             # 10 s stats line
-            if stats:
-                stats.tick()                                # minute flush, 10 min summary
             if dual is not None and now - last_dual_tick[0] >= 0.5:
                 last_dual_tick[0] = now
                 dual.tick({a: p["name"] for a, p in peers.items()})
@@ -4117,11 +4369,12 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
             # save's 486 Workshop mods (~15 GB) left the host deaf for as long
             # as the zips took, would have held every byte in RAM, and the host
             # dropped it as silent meanwhile. A job now plans batches of about
-            # MODS_BATCH_BYTES on disk, zips them one after another (at most two
-            # ahead of the sender) and each goes out as its own mods transfer
-            # with "batch": [k, n] in its fbegin; the joiner keeps the round
-            # open until the last one lands. A joiner from before batches (no
-            # "batches" in its mods_request) gets the whole set as one blob.
+            # MODS_BATCH_BYTES on disk, zips them MODS_PACK_THREADS at a time (at
+            # most two finished ones waiting for the sender) and each goes out as
+            # its own mods transfer with "batch": [k, n] in its fbegin; the joiner
+            # keeps the round open until the last one lands. A joiner from before
+            # batches (no "batches" in its mods_request) gets the whole set as one
+            # blob. The batches go out in plan order whatever thread finishes first.
             def start_pack_job(kind, addrs, wanted, got=None):
                 addrs = [x for x in addrs if x in peers]
                 if not addrs or not wanted:
@@ -4146,7 +4399,8 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
                     job["bytes"] = sum(sizes)
                     plan, cur, cur_bytes = [], [], 0
                     if job["batched"]:
-                        for (m, v), sz in zip(job["wanted"], sizes):
+                        # smallest first: the small mods fill a batch together, the big ones go alone
+                        for (m, v), sz in sorted(zip(job["wanted"], sizes), key=lambda t: t[1]):
                             if cur and cur_bytes + sz > MODS_BATCH_BYTES:
                                 plan.append(cur)
                                 cur, cur_bytes = [], 0
@@ -4157,13 +4411,17 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
                     else:
                         plan = [list(job["wanted"])]
                     job["plan"] = plan
-                    for group in plan:
-                        while len(job["ready"]) - job["taken"] >= 2 and not job["abort"]:
-                            time.sleep(0.2)
-                        if job["abort"]:
-                            break
+                    size_of = dict(zip(job["wanted"], sizes))
+                    job["sizes"] = [size_of.get(mv, 0) for group in plan for mv in group]   # plan order, for the status
+                    job["batch_bytes"] = [sum(size_of.get(mv, 0) for mv in group) for group in plan]
+                    log(f"[host] mod round for {job['names']}: {len(job['wanted'])} mod(s), {job['bytes'] / (1024.0 ** 3):.2f} GB on disk, "
+                        f"{len(plan)} batch(es), {MODS_PACK_THREADS} packer(s) at deflate level {MODS_ZIP_LEVEL}")
+
+                    def pack_group(group):
                         blob, meta, missing = bytearray(), [], []
                         for m, v in group:
+                            if job["abort"]:
+                                break
                             try:
                                 data = mod_package(m, v)
                             except Exception as e:                          # noqa: BLE001
@@ -4183,7 +4441,41 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
                                 meta.append({"name": modshare.mod_zip_name(m, v), "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
                                 blob += data
                             job["done"] += 1
-                        job["ready"].append((blob, meta, missing))
+                        return blob, meta, missing
+
+                    # MODS_PACK_THREADS packers take the plan's groups in order; a finished
+                    # group waits in `slots` until every earlier one is done, then moves to
+                    # `ready` -- the sender only ever sees the plan order. A packer starts a
+                    # new group only while fewer than two finished batches wait for the sender.
+                    lock = threading.Lock()
+                    slots, next_group, moved = {}, [0], [0]
+
+                    def packer():
+                        while not job["abort"]:
+                            with lock:
+                                gi = next_group[0]
+                                if gi >= len(plan):
+                                    return
+                                waiting = len(job["ready"]) - job["taken"] + len(slots)
+                                if waiting >= 2:
+                                    gi = None
+                                else:
+                                    next_group[0] = gi + 1
+                            if gi is None:
+                                time.sleep(0.2)
+                                continue
+                            result = pack_group(plan[gi])
+                            with lock:
+                                slots[gi] = result
+                                while moved[0] in slots:
+                                    job["ready"].append(slots.pop(moved[0]))
+                                    moved[0] += 1
+
+                    threads = [threading.Thread(target=packer, name=f"mod-pack-{i}", daemon=True) for i in range(max(1, MODS_PACK_THREADS))]
+                    for t in threads:
+                        t.start()
+                    for t in threads:
+                        t.join()
                     job["finished"] = True
 
                 pack_job[0] = job
@@ -4209,6 +4501,11 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
                             broadcast_start(save=True, only=rest)
                 elif transfer[0] is None and job["taken"] < len(job["ready"]):
                     blob, meta, missing = job["ready"][job["taken"]]
+                    # the transfer owns the blob now: drop the job's reference, or the round's
+                    # every batch stays in RAM until the lobby exits (27 GB after a 140-batch
+                    # round on 2026-09-20 -- the commit charge it took pushed Big Maps'
+                    # terrain pager into a compress/expand flip-flop, and the game stuttered)
+                    job["ready"][job["taken"]] = None
                     job["taken"] += 1
                     n, k = len(job["plan"]), job["taken"]
                     if missing:
@@ -4243,10 +4540,12 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
                 elif now - job["told"] >= 2.0:
                     job["told"] = now
                     n = len(job["plan"]) if job["plan"] else 0
+                    in_flight = transfer[0] is not None and transfer[0].kind == "mods"
+                    detail = _mods_progress_text(job, in_flight, now)
                     for x in live:
-                        _send_data(sock, x, {"t": "status", "state": "connected",
-                                             "detail": f"the host is packaging the mods you need\u2026 {job['done']}/{len(job['wanted'])}"
-                                                       + (f", batch {job['taken']}/{n} sent" if n else "")})
+                        _send_data(sock, x, {"t": "status", "state": "connected", "detail": detail})
+                    # the host waits too: its panel shows the same pace and time left
+                    io.emit({"type": "status", "state": "connected", "detail": f"{job['names']}: {detail}"})
             # Pump the save transfer (if any). Once every peer has resolved:
             #   all done (dropped peers don't block) -> start with save=true;
             #   any FAILED -> failed status naming them, NO start, and the
@@ -4257,6 +4556,9 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
                     if transfer[0].all_resolved() and transfer[0].kind == "mods":
                         # Only recipients with a successful catalogue receipt may start.
                         xfer, transfer[0] = transfer[0], None
+                        if pack_job[0] is not None and pack_job[0].get("batch_bytes") and xfer.done_count():
+                            j = pack_job[0]
+                            j.setdefault("landed", []).append((now, j["batch_bytes"][min(j["taken"], len(j["batch_bytes"])) - 1]))
                         got = set(mod_round[0] or set())
                         was_preflight,mod_preflight[0]=mod_preflight[0],False
                         mod_round[0] = None
@@ -4330,10 +4632,6 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
         if dual is not None:
             dual.close_links()
             DUAL[0] = None
-        if stats:
-            for p in peers.values():
-                stats.leave(p["name"], p.get("profile"))
-            stats.flush(force=True)
         for a in list(peers):
             _send_data(sock, a, {"t": "bye"})
         io.emit({"type": "status", "state": "failed",
@@ -5043,6 +5341,8 @@ def cmd_host(args):
     try:
         if args.relay_only:
             _log("[host] RELAY-ONLY: no game here; the oldest joiner is the leader")
+        else:
+            _publish_registry_at_start(_log)
         run_host(sock, args.name, io, code=code, relay=None if args.relay_only else relay,
                  forward_logs=args.forward_log or (), publisher=publisher,
                  lobby_name=args.lobby_name, relay_only=bool(args.relay_only),
@@ -5131,6 +5431,7 @@ def cmd_join(args):
     if not getattr(args, "no_mesh", False):
         mesh, conn = _mesh_from_conn(conn)
         _log("[join] mesh: direct links to other joiners enabled")
+    _publish_registry_at_start(_log)
     run_client(conn, args.name, io, relay=relay, mesh=mesh,
                profile_code=profile_code, forward_logs=args.forward_log or (), sync_runtime=make_runtime(args))
     return 0
@@ -5778,10 +6079,13 @@ def _run_transfer_mods(tag):
             f.write("return " + repr(mid) + "\n")
         src[mid] = d
     dest = os.path.join(base, "joinermods")
-    registry_real=(modshare.request_catalogue,modshare.catalogue)
-    modshare.request_catalogue=lambda: "test-catalogue"
+    registry_real=(modshare.request_catalogue,modshare.catalogue,modshare.write_registry)
+    modshare.request_catalogue=lambda extra=None: "test-catalogue"
+    modshare.write_registry=lambda token=None, extra=None: "test-catalogue"
+    cache_real, modshare.mod_zip_cache_dir = modshare.mod_zip_cache_dir, (lambda: os.path.join(base, "zipcache"))
     modshare.catalogue=lambda: ("test-catalogue",{("mod_zz","1"),("mod_have","1")})
     real = (modshare.save_mod_list, modshare.find_mod, modshare.installed_mod, modshare.install_target)
+    on_disk_real, modshare.on_disk_mod = modshare.on_disk_mod, lambda m, v: src.get(m) if m == "mod_have" else None
     share_was, SHARE_MODS[0] = SHARE_MODS[0], True          # off by default; this test is the round itself
     modshare.save_mod_list = lambda p, log=None: [("mod_zz", 1), ("mod_have", 1)]
     modshare.find_mod = lambda m, v: src.get(m)                       # the host has both
@@ -5884,10 +6188,11 @@ def _run_transfer_mods(tag):
                 ok=False
             else:
                 print("[mods] OK: hotjoin downloaded and registered required mods before start")
-        hev = _read_events(ios["host"].out_path)
-        chat = [e.get("text", "") for e in hev if e.get("type") == "chat"]
-        if not any("Sharing 1 mod(s)" in t for t in chat):
-            print(f"[mods:{tag}] FAIL: host never announced the mods round: {chat}")
+        # the round is announced per batch in the joiners' chat ("mod batch 1/1; Installed
+        # from the host: ..."); the host's "Sharing N mod(s)" chat went with batching
+        jchat = [e.get("text", "") for k in ("j1", "j2") for e in _read_events(ios[k].out_path) if e.get("type") == "chat"]
+        if not any("mod batch 1/1" in t and "Installed from the host" in t for t in jchat):
+            print(f"[mods:{tag}] FAIL: no joiner reported an installed mod batch: {jchat}")
             ok = False
     finally:
         stop.set()
@@ -5898,7 +6203,9 @@ def _run_transfer_mods(tag):
             except Exception:
                 pass
         (modshare.save_mod_list, modshare.find_mod, modshare.installed_mod, modshare.install_target) = real
-        modshare.request_catalogue,modshare.catalogue=registry_real
+        modshare.on_disk_mod = on_disk_real
+        modshare.request_catalogue,modshare.catalogue,modshare.write_registry=registry_real
+        modshare.mod_zip_cache_dir = cache_real
         SHARE_MODS[0] = share_was
         shutil.rmtree(base, ignore_errors=True)
     print(f"[mods:{tag}] {'OK' if ok else 'FAIL'}  ({time.time() - t0:.1f}s)")
@@ -5935,9 +6242,12 @@ def _run_mods_gate(tag):
     that skips the prompt would."""
     base = tempfile.mkdtemp(prefix="lobby_modgate_")
     dest = os.path.join(base, "mods")
-    registry_request_real=modshare.request_catalogue
-    modshare.request_catalogue=lambda: "consent-test"
+    registry_request_real=(modshare.request_catalogue, modshare.write_registry)
+    modshare.request_catalogue=lambda extra=None: "consent-test"
+    modshare.write_registry=lambda token=None, extra=None: "consent-test"
+    cache_real, modshare.mod_zip_cache_dir = modshare.mod_zip_cache_dir, (lambda: os.path.join(base, "zipcache"))
     real = (modshare.installed_mod, modshare.install_target)
+    on_disk_real, modshare.on_disk_mod = modshare.on_disk_mod, lambda m, v: None
     modshare.installed_mod = lambda m, v: None
     modshare.install_target = lambda m, v: os.path.join(dest, f"{m}_{v}")
     zips = {}
@@ -6018,8 +6328,10 @@ def _run_mods_gate(tag):
         push(r, 52, "mods", mzz + [(INCOMING_BASENAME + ".sav", b"x" * 10)])
         check("a mods round carrying a non-mod file is refused", not installed("mod_zz"))
     finally:
-        modshare.request_catalogue=registry_request_real
+        modshare.request_catalogue, modshare.write_registry=registry_request_real
+        modshare.mod_zip_cache_dir = cache_real
         modshare.installed_mod, modshare.install_target = real
+        modshare.on_disk_mod = on_disk_real
         shutil.rmtree(base, ignore_errors=True)
     return all(results)
 
@@ -6558,11 +6870,82 @@ def selftest_mesh():
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
+def _time_left_text(seconds):
+    """'<1 min', '7 min', '1 h 12 min' -- for a status line."""
+    if seconds is None:
+        return "?"
+    m = int(seconds // 60 + (1 if seconds % 60 >= 30 else 0))
+    if m < 1:
+        return "<1 min"
+    if m < 60:
+        return f"{m} min"
+    return f"{m // 60} h {m % 60} min"
+
+
+def _mods_progress_text(job, in_flight, now):
+    """The status line both panels show during a mods round: what the joiner
+    has (bytes of files landed), the pace since the round began, and what is
+    left at that pace. Before the first batch lands it is the packaging line
+    (bytes, not a mod count: batches go smallest first, so the count runs far
+    ahead of the batches and read as a stall). ``in_flight`` is True while a
+    batch is still crossing, so it is not counted as delivered."""
+    gb = job["bytes"] / (1024.0 ** 3)
+    n = len(job["plan"]) if job.get("plan") else 0
+    batch_bytes = job.get("batch_bytes") or []
+    landed = max(0, job["taken"] - (1 if in_flight else 0))
+    delivered = sum(batch_bytes[:landed])
+    if n and delivered:
+        # the pace over the last few landed batches (their bytes over the time
+        # since the landing before them), not since the round began: the average
+        # carried the packaging lead-in and one slow batch for minutes ("13 MB/s"
+        # while batches were landing at 50+, 2026-09-20 02:16)
+        log_ = job.get("landed") or []
+        recent = log_[-MODS_RATE_WINDOW:]
+        if recent:
+            t0 = log_[-MODS_RATE_WINDOW - 1][0] if len(log_) > MODS_RATE_WINDOW else job["started"]
+            rate = sum(b for _, b in recent) / max(1e-3, recent[-1][0] - t0)
+        else:
+            rate = delivered / max(1e-3, now - job["started"])
+        left = (job["bytes"] - delivered) / rate if rate > 0 else None
+        # short: the panel draws this beside the buttons at the bottom, ~50 characters
+        # wide on the joiner and less on the host, where the joiner's name leads
+        return (f"Mods {delivered / (1024.0 ** 3):.1f}/{gb:.1f} GB, "
+                f"{rate / (1024.0 ** 2):.0f} MB/s, {_time_left_text(left)} left, batch {landed}/{n}")
+    sizes = job.get("sizes") or []
+    packed_gb = sum(sizes[:min(job["done"], len(sizes))]) / (1024.0 ** 3)
+    if gb:
+        return (f"Packaging mods {packed_gb:.1f}/{gb:.1f} GB"
+                + (f", batch {job['taken']}/{n} sent" if n else ""))
+    return (f"Packaging mods {job['done']}/{len(job['wanted'])}"
+            + (f", batch {job['taken']}/{n} sent" if n else ""))
+
+
+def _workshop_rows(mods, lookup):
+    """[(workshop id, folder)] for the '*' mods of ``mods`` that ``lookup`` finds on disk."""
+    rows = []
+    for m, v in mods:
+        if isinstance(m, str) and m.startswith("*") and modshare.valid_mod(m, v):
+            folder = lookup(m, v)
+            if folder:
+                rows.append((m[1:], folder))
+    return rows
+
+
+def _publish_registry_at_start(log):
+    """Rewrite the Workshop registry from what is on disk now, keeping its
+    token, so the NEXT game start registers every consented download even if
+    the round that fetched it never reached its last batch."""
+    try:
+        modshare.write_registry()
+        rows = modshare.read_registry()[1]
+        if rows:
+            log(f"[mods] registry published: {len(rows)} Workshop folder(s) for the game's next catalogue refresh")
+    except (OSError, ValueError) as e:
+        log(f"[mods] could not publish the mod registry: {e}")
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if "--update" in argv:
-        import updater
-        return updater.main(argv, LOBBY_VERSION)
     ap = argparse.ArgumentParser(description="netpunch N-player lobby")
     ap.add_argument("mode", nargs="?", choices=["host", "join"],
                     help="host a lobby or join one with a CODE")

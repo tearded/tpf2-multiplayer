@@ -1,13 +1,15 @@
 """Compile the real edge decoder against a paired ownership-tool record.
 
-Requires MSVC Build Tools; artifacts stay in .local-test/road-ownership.
+Requires Visual Studio 2022 with the C++ workload, found through tools/msvc_env.bat;
+artifacts stay in .local-test/road-ownership.
 The memory-vector reader is stubbed, not the decoder under test.
 """
 from pathlib import Path
 import subprocess
+from slice_source import slice_source   # the source with native/src/slice/*.inl inlined
 
 ROOT = Path(__file__).resolve().parents[1]
-source = (ROOT / 'native/src/slice_hook.cpp').read_text(encoding='utf-8')
+source = slice_source(ROOT)
 edge = source[source.index('struct Edge {'):source.index('\n', source.index('struct Edge {'))]
 decoder = source[source.index('static int DecodeEdgesVec('):source.index('static int DecodeNodesVec(')]
 fixture = bytes.fromhex(
@@ -51,8 +53,9 @@ int main() {
 '''
 (out / 'decode_test.cpp').write_text(harness, encoding='utf-8')
 (out / 'decode_test.cmd').write_text(
-    '@echo off\ncall "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat" >nul\n'
-    'cl /nologo /EHsc /W4 decode_test.cpp /Fe:decode_test.exe || exit /b 1\n'
-    'decode_test.exe\n', encoding='utf-8')
-subprocess.run(['cmd', '/c', 'decode_test.cmd'], cwd=out, check=True)
+    '@echo off\ncall "' + str(ROOT / 'tools/msvc_env.bat') + '" >nul 2>nul || exit /b 1\n'
+    'cl /nologo /EHsc /W4 "' + str(out / 'decode_test.cpp') + '" /Fo:"' + str(out / 'decode_test.obj')
+    + '" /Fe:"' + str(out / 'decode_test.exe') + '" || exit /b 1\n'
+    '"' + str(out / 'decode_test.exe') + '"\n', encoding='utf-8')
+subprocess.run(['cmd', '/c', str(out / 'decode_test.cmd')], cwd=out, check=True)
 print('PASS: captured owned/public edge records, absent optional payload, reuse, malformed/empty vectors')

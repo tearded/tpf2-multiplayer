@@ -188,6 +188,25 @@ to lock yours (switching into a locked company needs its password). A company is
 game's own company window; until then it is named after the player who founded it: "<player>'s
 company", then "<player>'s 2nd company" and so on, whoever plays it now.
 
+### AutoSig2
+
+With AutoSig2 enabled, its existing controls work through multiplayer replay:
+automatic placement with the selected spacing, **Replace** and **Remove**, and
+the **Forward/Backward** direction for those two modes. Place the initial signal
+as usual. Its settings are captured with the click; changing controls while the
+command is in flight does not change that action.
+
+The initial signal and its follow-up actions appear after the lockstep delay.
+Replace/remove follow AutoSig2's route rules, including its branch, station and
+route-length limits. As in AutoSig2, the temporary initial signal is removed in
+these modes. A replacement uses the selected model and one-way setting. Signals
+belonging to another company and waypoints are not editable AutoSig targets;
+a plan containing one is refused. A target changed before replay is skipped,
+never substituted with a nearby object.
+
+AutoSig2 must be installed and enabled separately; this adapter does not bundle
+or edit the Workshop mod. Every participant needs the same multiplayer build.
+
 ## Ports and firewalls
 
 - **Most hosts need no port forwarding.** When a friend joins, both lobbies punch through
@@ -222,25 +241,7 @@ In a two-player host lobby, this pauses both games, saves and transfers the host
 reloads both players and compares the fresh worlds before resuming. An intentional
 pause is preserved. Client-only changes are discarded. See [One-click recovery](RESYNC.md)
 for progress, retry and supported-session limits. `/sync` serves joining players; it does not reload
-players already in the game. The Resync section is independent of log reporting below.
-
-The first desync in a session also opens a **Desync detected** window that asks whether to send
-that game's logs to the developers:
-
-- **Always send**: send them now, and in later sessions without asking.
-- **Only this once**: send them now and ask again in the next session.
-- **Never**: send nothing, and never show the window again on this computer.
-
-A desync keeps being detected until the players reload, so the window appears, and logs are sent,
-at most once per session: not again for the same desync, and not after reloading the shared save in
-the same lobby.
-
-The logs go to the project's server (the one behind the public games list): the game's log with the
-mod's script lines, the mod's DLL logs and files, and the game's graphics settings. Windows user and
-computer names, the Steam account number, IP addresses and lobby codes are removed first; player
-names and chat can remain. The lobby's own logs and crash dumps are not sent. A chat line from
-MULTIPLAYER says when they arrived. Type `/desynclogs always`, `/desynclogs ask` or `/desynclogs never`
-in the in-game chat to change your choice; it is kept in `%LOCALAPPDATA%\tpf2mp\data\tpf2mp_prefs.txt`.
+players already in the game.
 
 For a bug report, send the logs of **every** player. The mod gathers them in one folder,
 `%LOCALAPPDATA%\tpf2mp\logs\`:

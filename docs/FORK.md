@@ -9,13 +9,13 @@ Landkarte darüber.
 
 | | |
 |---|---|
-| Stand vom | 2026-09-20 |
-| Original (Upstream) | `silver2127/tpf2-multiplayer`, `main` 5783d4d = Release 0.6.1.9 |
+| Stand vom | 2026-09-22 |
+| Original (Upstream) | `silver2127/tpf2-multiplayer`, `main` 9cf0219 (vollstaendig in den Fork gemergt; nur Quellcode, kein Release) |
 | Fork | `tearded/tpf2-multiplayer`, Arbeitsbranch `codex/vehicle-name-sync` |
-| Letzter Upstream-Merge | 325b879 (Upstream 0.6.1.9, 2026-09-20), davor 0.6.1.1 |
+| Letzter Upstream-Merge | Upstream main 9cf0219, 2026-09-22 (vorher 325b879 / 0.6.1.9) |
 | Letzte Fork-Auslieferung | 0.6.2.10 aus b184c35 (Merge-Stand, reversed-Flag, Geschwindigkeit „letzter Klick"), Kanal **Mein Fork** im Launcher, 2026-09-20 |
-| Nächste Auslieferung | offen; erst gemeinsamer Spieltest von 0.6.2.10 |
-| Umfang der Abweichung | 77 Dateien, rund 4500 Fork-Zeilen: 15 Lua-Dateien der Mod, 3 native Dateien, CI/Release-Werkzeuge, 20 Fork-Releasehinweise |
+| Nächste Auslieferung | nicht beauftragt; Quellupdate vom 2026-09-22 bleibt unveroeffentlicht als Spielpaket |
+| Verbleibende Spiel-Extras | Navigation, Geschwindigkeitsmodus letzter Klick und Stationsstrassen-Anschlusskorrektur. Quellstand auf Upstream main 9cf0219; Launcherrelease weiterhin 0.6.2.10. |
 
 ## Versionierung und Kanäle
 
@@ -38,18 +38,18 @@ wer etwas Neues braucht, trägt es hier ein.
 |---|---|---|
 | A | Auslieferung: Workflow, Release-Skripte, Testgruppen, Fork-Versionierung | drin, Pflicht für den Launcher-Kanal |
 | 5 | Kartennavigation (Ping, Gehe zu, Fenster-Hotkey) | drin |
-| 6 | Spielstandauswahl im Host-Lobbyfenster | drin |
+| 6 | Spielstandauswahl im Host-Lobbyfenster | Upstream seit Merge von PR #9 (8f65d33, 2026-09-21) |
 | 7 | Resync | vollständig Upstream (PR #4), kein Fork-Rest mehr |
-| 8 | Bestätigungstöne | drin, weil mit 12 in einem PR-#6-Commit verwachsen; bei Bedarf trennbar |
-| 9–14 | Fences, Depotkauf, Straßeneigentum, Linienhalt-Wahl, Parameter-Zeilenumbrüche, recycelte IDs | drin, PR #6 offen |
-| 15 | Fahrzeugname reist mit (VNAME) | drin |
-| 16 | Fahrzeug-Stopp repliziert (VSTOP) | drin |
+| 8 | Bestätigungstöne | Upstream, Paket #6 ueber dev uebernommen |
+| 9–14 | Fences, Depotkauf, Straßeneigentum, Linienhalt-Wahl, Parameter-Zeilenumbrüche, recycelte IDs | Upstream, Paket #6 ueber dev uebernommen |
+| 15 | Fahrzeugname reist mit (VNAME) | Upstream, 68f6dc4 (2026-09-22) |
+| 16 | Fahrzeug-Stopp repliziert (VSTOP) | Upstream, c0dde37 (2026-09-22) |
 | 17 | Stationsstraßen-Anschluss nativ | drin |
 | 18 | Linienklick-Basis (`lineBaseFor`) | **raus**, Revert 6dd70a6; Upstream 0.6.1.9 löst die Ursache. Zurückholen nur, wenn im Spiel weiter Halte doppelt erscheinen |
-| 19 | AutoSig2-Kompatibilität | drin |
+| 19 | AutoSig2-Kompatibilität | Upstream, f898165 + 9cf0219: Platzieren, Ersetzen/Entfernen vorwaerts/rueckwaerts. Fork-Quellstand jetzt komplett; ausgeliefertes 0.6.2.10 hat nur Platzieren. |
 | 20 | luacheck überspringt Langstrings | drin, sonst fällt die CI über Upstreams Workshop-Datei |
 | 21 | Natives Vorschau-Rendering | entfällt, Upstream baut die Vorschau selbst; kein Fork-Code mehr |
-| 22 | Umgedrehte Fahrzeugteile (reversed-Flag) reisen mit dem Kauf (VBUY/VREPL) | drin, Kandidat für Upstream (dort derselbe Platzhalter) |
+| 22 | Umgedrehte Fahrzeugteile (reversed-Flag) reisen mit dem Kauf (VBUY/VREPL) | drin, **Upstream hat es** (38941b4 = Port von a7047da, Release 0.6.1.12, 2026-09-20); im Quellstand jetzt unveraendert von Upstream |
 | 23 | Spielgeschwindigkeit: letzter Klick eines beliebigen Spielers gewinnt, nur 1x/2x/4x (`K.SPEED_MODE = "last"`); Upstreams Vote-Mittel bleibt als `"vote"` im Code | drin, fork-eigen (bewusste Abweichung, Benutzerwunsch 2026-09-20) |
 
 ## Was der Fork gegenüber dem Original enthält
@@ -62,30 +62,30 @@ Rest), **Kandidat** = sollte als PR nach Upstream, sobald spielgetestet.
 
 | Bereich | Dateien | Test | Status |
 |---|---|---|---|
-| Fahrzeugname reist mit dem Kauf (`VNAME`), gegen Zugnamen-Desync bei verschiedenen Spielsprachen | `vehicles.lua`, `inject.lua` | `vehicle_name_sync_test` | Kandidat |
-| Fahrzeug-Stopp-Schalter repliziert (`VSTOP`, nativer Factory-Eintrag id 18) | `vehicles.lua`, `inject.lua`, `lockstep.lua`, `slice_hook.cpp` | `foreign_edit_guard_test`, `vehicle_line_choice_test` | Kandidat |
-| Umgedrehte Fahrzeugteile: reversed-Flag (VehiclePart+0x04) im VBUY/VREPL-Wire, fünftes Feld der Teilespezifikation | `slice_hook.cpp`, `inject.lua`, `vehicles.lua` | `vehicle_reversed_test` | Kandidat |
-| Automatische Linienhalt-Wahl beim Kauf (`-1` probiert Halte der Reihe nach) | `vehicles.lua` | `vehicle_line_choice_test` | PR offen (#6) |
-| Depotkauf bei versetzter Mod-Geometrie (UEP-Terminal) | `vehicles.lua` | `depot_buy_test` | PR offen (#6) |
-| Konstruktionsparameter mit Zeilenumbrüchen | `cons.lua`, `net.lua` | `params_line_test` | PR offen (#6) |
-| Recycelte Entity-IDs: Bauwerk gilt nur mit passender CONSTRUCTION-Komponente als vorhanden | `cons.lua` | `con_recycled_id_test` | PR offen (#6) |
-| Straßeneigentum über logische Firmennummern (`ROADP own`) | `roads.lua`, `geom.lua`, `stops.lua` | `edge_owner_decode_test`, `crossing_replay_test` | PR offen (#6) |
-| Snowball Fences / Hecken als `FENCE`-Befehl, ganze Zäune, Abriss | `fences_compat.lua`, `mod.lua`, `previews.lua` | `fences_compat_test` | PR offen (#6) |
-| Bestätigungstöne für abgefangene Fahrzeugaktionen | `action_sounds.lua`, `lockstep.lua` | `action_sounds_test` | PR offen (#6) |
-| AutoSig2 automatische Signale als strict Follow-up | `autosig_compat.lua`, `mod.lua` | `autosig_compat_test` | fork (Mod-Kompatibilität, Upstream-Interesse unklar) |
+| Fahrzeugname reist mit dem Kauf (`VNAME`), gegen Zugnamen-Desync bei verschiedenen Spielsprachen | `vehicles.lua`, `inject.lua` | `vehicle_name_sync_test` | Upstream (68f6dc4) |
+| Fahrzeug-Stopp-Schalter repliziert (`VSTOP`, nativer Factory-Eintrag id 18) | `vehicles.lua`, `inject.lua`, `lockstep.lua`, `slice_hook.cpp` | `foreign_edit_guard_test`, `vehicle_line_choice_test` | Upstream (c0dde37) |
+| Umgedrehte Fahrzeugteile: reversed-Flag (VehiclePart+0x04) im VBUY/VREPL-Wire, fünftes Feld der Teilespezifikation | `slice/vehicles.inl`, `inject.lua`, `vehicles.lua` | `vehicle_reversed_test` | Upstream (38941b4, 0.6.1.12; dort in `native/src/slice/vehicles.inl`) |
+| Automatische Linienhalt-Wahl beim Kauf (`-1` probiert Halte der Reihe nach) | `vehicles.lua` | `vehicle_line_choice_test` | Upstream (Paket #6 ueber dev) |
+| Depotkauf bei versetzter Mod-Geometrie (UEP-Terminal) | `vehicles.lua` | `depot_buy_test` | Upstream (Paket #6 ueber dev) |
+| Konstruktionsparameter mit Zeilenumbrüchen | `cons.lua`, `net.lua` | `params_line_test` | Upstream (Paket #6 ueber dev) |
+| Recycelte Entity-IDs: Bauwerk gilt nur mit passender CONSTRUCTION-Komponente als vorhanden | `cons.lua` | `con_recycled_id_test` | Upstream (Paket #6 ueber dev) |
+| Straßeneigentum über logische Firmennummern (`ROADP own`) | `roads.lua`, `geom.lua`, `stops.lua` | `edge_owner_decode_test`, `crossing_replay_test` | Upstream (Paket #6 ueber dev) |
+| Snowball Fences / Hecken als `FENCE`-Befehl, ganze Zäune, Abriss | `fences_compat.lua`, `mod.lua`, `previews.lua` | `fences_compat_test` | Upstream (Paket #6 ueber dev) |
+| Bestätigungstöne für abgefangene Fahrzeugaktionen | `action_sounds.lua`, `lockstep.lua` | `action_sounds_test` | Upstream (Paket #6 ueber dev) |
+| AutoSig2 Platzieren und nun auch Ersetzen/Entfernen in beiden Richtungen | `autosig_compat.lua`, `mod.lua`, `stops.lua` | `autosig_compat_test`, `autosig_modes_test`, eigener Zweiinstanz-Test | Upstream (f898165, 9cf0219); neue Modi im Fork-Quellstand, noch nicht ausgeliefert |
 | Spielgeschwindigkeit „letzter Klick gewinnt", Stufen 1/2/4 statt Vote-Mittel mit Bruchwerten | `pacing.lua`, `lockstep.lua` (Schalter `K.SPEED_MODE`, Geschwindigkeitszeile) | `speed_vote_test` | fork |
 | Kartennavigation: Ping Ctrl+Shift+P, „Gehe zu", Fenster Ctrl+Shift+D | `navigation.lua`, `menu_hook.cpp` | `navigation_test` | fork |
 | Host-geführter Resync mit Bereitschaftsprüfung | `resync.lua`, `menu_hook.cpp` | `resync_test`, Recovery-Matrix | PR gemergt (#4), vollständig Upstream |
-| Gemeinsame Bauvorschauen Straße/Schiene | `previews.lua`, `tpf2_previews.dll` | `preview_test`, `preview_perf_test` | PR gemergt (#3), vollständig Upstream; Fork ergänzt nur die Fences-Vorschau |
+| Gemeinsame Bauvorschauen Straße/Schiene | `previews.lua`, `tpf2_previews.dll` | `preview_test`, `preview_perf_test` | PR gemergt (#3), vollstaendig Upstream, inklusive Fences-Vorschau aus Paket #6 |
 | Bahnübergänge, Abriss, Straßen unter Brücken | `roads.lua`, `cons.lua` | `crossing_replay_test`, `bridge_companion_test` | PR gemergt (#2) |
 
 ### Nativ (`native/src`)
 
 | Bereich | Dateien | Status |
 |---|---|---|
-| Stationsstraßen-Anschluss: Vorlagensegmente über `segmentsBefore`, loses Vorlagenende auf den versandten Splitknoten, Frozen-Index umschreiben | `slice_hook.cpp` (MergeTemplateStreet), `station_weld.h` | Kandidat, Spieltest offen (0.6.2.8) |
-| `VSTOP` Factory-Hook | `slice_hook.cpp` | Kandidat (siehe oben) |
-| Spielstandauswahl im Host-Lobbyfenster (SELECT SAVE, NEXT/PREVIOUS, REFRESH) | `menu_hook.cpp`, `tools/lobby_save_picker_test.cpp` | fork |
+| Stationsstraßen-Anschluss: Vorlagensegmente über `segmentsBefore`, loses Vorlagenende auf den versandten Splitknoten, Frozen-Index umschreiben | `slice/station_weld.inl` (MergeTemplateStreet), `station_weld.h` | Kandidat, Spieltest offen (0.6.2.8) |
+| `VSTOP` Factory-Hook | `slice_hook.cpp`, `slice/capture.inl`, `slice/add_hook.inl` | Upstream (c0dde37) |
+| Spielstandauswahl im Host-Lobbyfenster (SELECT SAVE, NEXT/PREVIOUS, REFRESH) | `menu_hook.cpp`, `tools/lobby_save_picker_test.cpp` | Upstream (PR #9 gemergt, 8f65d33) |
 | Navigation im Multiplayer-Fenster (Ping-Liste, Gehe-zu-Knöpfe) | `menu_hook.cpp` | fork |
 
 ### Build, Test und Auslieferung (bleibt Fork-eigen)
@@ -112,7 +112,9 @@ für Vorlagensegmente).
 | [#2](https://github.com/silver2127/tpf2-multiplayer/pull/2) | Bahnübergänge, Abriss, Straßen unter Brücken | gemergt |
 | [#3](https://github.com/silver2127/tpf2-multiplayer/pull/3) | Gemeinsame Bauvorschauen | gemergt |
 | [#4](https://github.com/silver2127/tpf2-multiplayer/pull/4) | Host-geführter Resync mit Bereitschaftsprüfung | gemergt |
-| [#6](https://github.com/silver2127/tpf2-multiplayer/pull/6) | Parameter, Depotkauf, Straßeneigentum, Töne, Linienhalte, Fences, recycelte IDs (6 Commits auf Upstream 7c15ea8) | offen, Branch `codex/pr-replication-bugfixes` |
+| [#6](https://github.com/silver2127/tpf2-multiplayer/pull/6) | Parameter, Depotkauf, Straßeneigentum, Töne, Linienhalte, Fences, recycelte IDs (6 Commits auf Upstream 7c15ea8) | geschlossen; ueber dev in main enthalten (a06775f), API merged=false ist hier kein Inhaltsnachweis |
+
+Save-Picker: [#9](https://github.com/silver2127/tpf2-multiplayer/pull/9), am 2026-09-21 um 20:45 UTC gemergt (8f65d33); Branch `codex/pr-lobby-save-picker`, Commit `309eb57` auf Upstream `664110f`. Drei Dateien (Menue, Integrationstest, Spielanleitung), nativer Menuebuild und Offline-Integrationstest bestanden; kein neuer gemeinsamer Spieltest. Worktree `.local-test/pr-packages/save-picker`. Spielstandauswahl ist damit zur Upstream-Uebernahme eingereicht und nicht mehr bewusst fork-exklusiv.
 
 PR-Branches liegen als Worktrees unter `.local-test/pr-packages/` und basieren
 direkt auf Upstream-`main`, nicht auf dem Fork-Branch. Fork-Release, Version,
@@ -134,11 +136,11 @@ Launcher und CI gehören nie in eine Upstream-PR.
 3. **Fixes klein und einzeln nach Upstream.** Jeder Fork-Fix, der das Spiel betrifft,
    ist ein PR-Kandidat, sobald er im gemeinsamen Spiel bestätigt ist. PR-Branch
    auf Upstream-`main` aufsetzen, nur die Sachänderung plus Test, keine Versions-,
-   Launcher- oder CI-Dateien. Reihenfolge nach Spieltest: VSTOP, VNAME,
+   Launcher- oder CI-Dateien. Verbleibende Kandidaten nach Spieltest:
    Stationsstraßen-Weld, luacheck.
 4. **Fork-eigen bleibt:** Launcher-Kanal, CI/Release-Pipeline, Testgruppen,
-   Navigation, Spielstandauswahl, Mod-Kompatibilität (AutoSig2, Fences bis
-   Upstream sie nimmt). Neue Features nur mit Eintrag im beschlossenen
+   Navigation und der Geschwindigkeitsmodus letzter Klick. AutoSig2 und Fences sind
+   bereits Upstream. Neue Features nur mit Eintrag im beschlossenen
    Funktionsumfang; Upstream-Verhalten hat im Zweifel Vorrang vor einer
    Fork-Variante desselben Fixes.
 5. **Jede Fork-Änderung hat einen Offline-Test** in `tools/` und steht in der
@@ -167,7 +169,7 @@ Launcher und CI gehören nie in eine Upstream-PR.
   gedrückter Taste (`native_io.cpp`), siehe SESSION_LOG 2026-09-19.
 - Upstreams Dedicated-Server-Modus ist im Fork ungetestet; der Fork-Launcher
   kennt ihn nicht.
-- PR #6 wartet auf den Maintainer.
+- Quellupdate vom 2026-09-22 vor einer spaeteren Auslieferung gemeinsam im Spiel testen. Es gibt daraus noch kein neues Launcherpaket.
 - `docs/PERFORMANCE_REVIEW.md` liegt untracked im Arbeitsverzeichnis (fremd, nicht
   eingecheckt).
 
@@ -177,3 +179,46 @@ Bei jedem Upstream-Merge: Tabelle „Stand", Konfliktstellen, Status-Spalten
 (gemergte PRs aus der Kandidatenliste nehmen). Bei jeder Auslieferung: „Letzte
 Fork-Auslieferung" und „Offen". Bei jeder PR: Tabelle „Upstream-PRs". Zeilen
 für erledigte offene Punkte löschen, nicht durchstreichen.
+
+## Separater Launcher-Release (2026-09-21)
+
+Launcher1.0.2 in tearded/tpf2-launcher veroeffentlicht (Commit10c5ed8,
+Tagworkflow35616602040 erfolgreich). Unterstuetzt die Netpunch-Runtime des
+Originalpakets0.6.1.12 inklusive Sicherung und Rueckwechsel. Download/Hash und
+Signatur selbst verifiziert; GitHub-Latest1.0.2 bestaetigt. Direkter Updatefeed-
+Abruf aus Agentumgebung derzeit504; UI-Update noch nicht bestaetigt.
+Multiplayer-Forkrelease0.6.2.10 unveraendert.
+
+## Direkte Upstream-Uebernahme (2026-09-22)
+
+Auf ausdruecklichen Benutzerauftrag mit bestaetigten GitHub-Schreibrechten vier
+Commits auf offiziellem main: f898165 (AutoSig-Platzieren), 68f6dc4 (Kaufnamen),
+c0dde37 (Stopp/Weiterfahrt), 9cf0219 (AutoSig-Ersetzen/Entfernen in beiden Richtungen).
+19 Dateien, ohne Fork-Versionierung, Release-Pipeline oder private Testdateien.
+Native All-Build und gezielte Regressionen bestanden. Eigener lokaler Zweiinstanz-
+Engine-Test in separater kleiner Welt: sechs AutoSig-Faelle, identische Signal-
+Snapshots, 49 angewendete Befehle pro Instanz, SYNC/desyncs=0, leere Queues.
+Seed-Einstellungen per privatem Skript ausgefuehrt; keine Workshop-GUI-Validierung
+und kein neuer benutzerbestaetigter gemeinsamer Spieltest fuer VNAME/VSTOP.
+Spiele regulaer beendet, vorherige Installation 0.6.1.18 und beide Profile samt
+Sandbox-Overlays hashgeprueft wiederhergestellt. Kein Tag/Release/Launcherupdate.
+CI: https://github.com/silver2127/tpf2-multiplayer/actions/runs/35755400616 (erfolgreich: MSI, ZIP, Checksums, Artefakte; Release-Schritt wie erwartet uebersprungen).
+
+## Upstream-Abgleich des Quellcodes (2026-09-22)
+
+Upstream main 9cf0219 per Merge uebernommen. Navigation, letzter
+Geschwindigkeitsklick und Stationsstrassen-Korrektur bleiben erhalten; letztere
+liegt nach Upstreams Dateiaufteilung in native/src/slice/station_weld.inl.
+Doppelten Bestaetigungston-GUI-Tick aus dem automatischen Merge entfernt.
+Versionsnummer bleibt 0.6.2.10, kein Tag und keine neue Auslieferung beauftragt.
+
+Fork-Buildpfad auf die gebuendelte Netpunch-Runtime angepasst. Entfernte
+Upstream-Telemetrie-/Updater-Tests entfallen; neue portable Upstream-Regressionen
+sind in der Logikgruppe. Upstreams eigener MSI-Workflow laeuft nur im
+Originalrepository, damit Fork-Tags weiter ausschliesslich die gepruefte
+Draft-Release-Pipeline verwenden. AutoSig-Tests gegen installierte Workshop-Dateien
+werden separat lokal ausgefuehrt; diese Dateien sind auf CI nicht vorhanden.
+
+Validierung: nativer All-Build ohne Deployment, alle 58 Testprogramme der vier
+Regressionsgruppen (inklusive Luacheck und Recovery fuer 2/3/5/8 Spieler)
+sowie beide AutoSig-Workshop-Testreihen bestanden. Kein neuer Spieltest.

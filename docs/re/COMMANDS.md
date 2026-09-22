@@ -326,7 +326,7 @@ int on the stack, so the disassembly reads as a struct definition. VehiclePart:
 modelId 0, reversed 4, loadConfig 8, color 0x20, logo 0x30. TransportVehiclePart:
 part 0, purchaseTime 0x50, maintenanceState 0x58, targetMaintenanceState 0x5c,
 autoLoadConfig 0x60. TransportVehicleConfig: vehicles 0, vehicleGroups 0x18 -- all
-matching the sweeps and decompiles above (2026-09-20, build 35924).
+matching the sweeps and decompiles above (tearded's fork, 2026-09-20, build 35924).
 
 `ecs::component::Line`:
 
